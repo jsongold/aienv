@@ -98,5 +98,3 @@ zsh tests/run.zsh    # acceptance suite alone
 ```
 
 Runs against a temp `AIENV_HOME` with fake agent binaries. No network, no real login.
-
-The zsh CLI this was ported from is kept at `legacy/aienv.zsh` as the behavioral spec.
