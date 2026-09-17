@@ -1,0 +1,89 @@
+#!/bin/zsh -f
+# aienv-shim
+# Installed as $AIENV_HOME/bin/{claude,codex,opencode}. Dispatches on its own
+# basename, points the agent's config env var at the store bound to $PWD and execs
+# the real binary. Nothing extra is exported, so a nested agent call started in
+# another directory resolves that directory's account on its own.
+
+emulate -L zsh
+
+app=${0:t}
+self=${0:A}
+
+if [[ -n ${AIENV_HOME-} ]]; then
+  home=$AIENV_HOME
+else
+  d=${self:h}
+  if [[ ${d:t} == bin && -d ${d:h}/.store ]]; then home=${d:h}; else home=$HOME/.aienv; fi
+fi
+shimdir=${home}/bin
+sd1=${shimdir:A}
+sd2=${self:h}
+
+# Recursion guard: never pick a candidate inside the shim dir, never pick this very
+# file, never pick another shim copy (handles symlinked, relative, trailing-slash
+# and duplicate PATH entries).
+real=''
+for p in ${(s.:.)PATH}; do
+  [[ -n $p ]] || p=$PWD
+  pa=${p:A}
+  [[ $pa == $sd1 || $pa == $sd2 ]] && continue
+  cand=$pa/$app
+  [[ -f $cand && -x $cand ]] || continue
+  [[ ${cand:A} == $self ]] && continue
+  junk=''; l2=''
+  { read -r junk; read -r l2 } < $cand 2>/dev/null
+  [[ $l2 == '# aienv-shim' ]] && continue
+  real=$cand
+  break
+done
+
+if [[ -z $real ]]; then
+  print -ru2 -- "aienv: real '$app' not found in PATH outside $shimdir"
+  exit 127
+fi
+
+bid=''; bkey=''
+bindings=$home/bindings
+if [[ -f $bindings ]]; then
+  dir=${PWD:A}
+  best=''; bestlen=-1; bestkey=''; glob=''
+  while IFS=$'\t' read -r a d i || [[ -n $a ]]; do
+    a=${a%$'\r'}; d=${d%$'\r'}; i=${i%$'\r'}
+    [[ -n $a && -n $d && -n $i && $a == "$app" ]] || continue
+    if [[ $d == '*' ]]; then
+      [[ -n $glob ]] || glob=$i
+      continue
+    fi
+    dd=${d%/}
+    if [[ -z $dd || $dir == "$dd" || $dir == "$dd"/* ]]; then
+      if (( ${#d} > bestlen )); then bestlen=${#d}; best=$i; bestkey=$d; fi
+    fi
+  done < $bindings
+  if [[ -n $best ]]; then
+    bid=$best; bkey=$bestkey
+  elif [[ -n $glob ]]; then
+    bid=$glob; bkey='*'
+  fi
+fi
+
+if [[ -n $bid ]]; then
+  if [[ ! -d $home/.store/$bid ]]; then
+    print -ru2 -- "aienv: binding for $bkey points at missing account $bid; run: aienv switch $app"
+    exit 1
+  fi
+  store=$home/.store/$bid
+  case $app in
+    claude)
+      unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
+      export CLAUDE_CONFIG_DIR="$store" ;;
+    codex)
+      unset OPENAI_API_KEY CODEX_ACCESS_TOKEN
+      export CODEX_HOME="$store" ;;
+    opencode)
+      unset ANTHROPIC_API_KEY OPENAI_API_KEY
+      export XDG_DATA_HOME="$store" ;;
+  esac
+fi
+
+exec "$real" "$@"

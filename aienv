@@ -1,0 +1,676 @@
+#!/bin/zsh -f
+# aienv - switch the logged-in subscription account of coding-agent CLIs per directory.
+# aienv never reads, writes, copies or prints tokens, credential files or Keychain
+# entries. API keys are out of scope: they are only ever named, never used.
+
+emulate -L zsh
+setopt err_return no_unset pipe_fail
+
+# Home: explicit AIENV_HOME wins, else derive from this script's own location
+# ($AIENV_HOME/bin/aienv), else the default. Computed at top level: inside a zsh
+# function $0 is the function name, not the script.
+typeset -g AIENV_SELF=${0:A}
+if [[ -z ${AIENV_HOME-} ]]; then
+  _d=${AIENV_SELF:h}
+  if [[ ${_d:t} == bin && -d ${_d:h}/.store ]]; then
+    AIENV_HOME=${_d:h}
+  else
+    AIENV_HOME="$HOME/.aienv"
+  fi
+  unset _d
+fi
+typeset -g  AIENV_HOME="$AIENV_HOME"
+typeset -g  STORE_DIR="$AIENV_HOME/.store"
+typeset -g  BINDINGS="$AIENV_HOME/bindings"
+typeset -g  LOCK_DIR="$AIENV_HOME/.lock"
+typeset -ga AIENV_APPS=(claude codex opencode)
+
+# Non-credential items linked from $HOME/.claude into a claude store.
+# Single point of change; never add credentials, .claude.json or history.
+# projects (conversation transcripts) is shared on purpose: after a switch,
+# 'claude -c' resumes the same conversation under the newly bound account.
+typeset -ga CLAUDE_SHARED=(
+  CLAUDE.md settings.json skills agents commands hooks rules keybindings.json
+  projects
+)
+
+# Union of every env var that outranks a subscription login (names only, never values).
+typeset -ga ALL_KEY_VARS=(
+  ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
+  OPENAI_API_KEY CODEX_ACCESS_TOKEN
+)
+
+typeset -g HAVE_JQ=0
+command -v jq >/dev/null 2>&1 && HAVE_JQ=1 || HAVE_JQ=0
+
+typeset -g REPLY='' M_app='' M_org='-' M_email='' ID_ORG='-' ID_EMAIL=''
+typeset -g R_ID='' R_SRC='none' R_DIR='' R_DANGLING=0
+typeset -g FILT_APP='' FILT_DIR='' FILT_ID='' LOCK_HELD='' ADD_STORE=''
+typeset -ga ACC_IDS=() ACC_ORGS=() ACC_EMAILS=() ARGS=() KEYVARS=()
+
+die()  { print -ru2 -- "aienv: $*"; exit 1 }
+warn() { print -ru2 -- "aienv: warning: $*" }
+
+usage() {
+  cat <<EOF
+usage: aienv <command>
+
+  add <app>                       log a new account in and store it separately
+  switch [app] [match]            bind an account to the current directory
+  switch [app] [match] --global   bind as the fallback for every directory
+  switch <app> --none             drop the binding for this directory
+  show [--no-status]              accounts, bindings and warnings
+  remove <app> <match>            log out and delete an account store
+  resolve <app> [dir]             print the store bound for dir (plumbing)
+  help
+
+match: an id, an exact org/email, an exact email, or a unique substring.
+apps: ${AIENV_APPS[*]}   home: $AIENV_HOME
+EOF
+}
+
+usage_err() { print -ru2 -- "aienv: $*"; usage >&2; exit 2 }
+
+require_app() {
+  if [[ $1 == cursor-agent ]]; then die "cursor-agent is unsupported: it keeps one global Keychain entry, so its account cannot be relocated per directory"; fi
+  if (( ${AIENV_APPS[(Ie)$1]} == 0 )); then usage_err "unknown app: $1 (supported: ${AIENV_APPS[*]})"; fi
+}
+
+app_env_var() {
+  case $1 in
+    claude)   REPLY=CLAUDE_CONFIG_DIR ;;
+    codex)    REPLY=CODEX_HOME ;;
+    opencode) REPLY=XDG_DATA_HOME ;;
+    *) return 1 ;;
+  esac
+}
+
+app_key_vars() { # app -> KEYVARS (vars that outrank the subscription login)
+  case $1 in
+    claude)   KEYVARS=(ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN) ;;
+    codex)    KEYVARS=(OPENAI_API_KEY CODEX_ACCESS_TOKEN) ;;
+    opencode) KEYVARS=(ANTHROPIC_API_KEY OPENAI_API_KEY) ;;
+    *)        KEYVARS=() ;;
+  esac
+}
+
+app_cmd() { # app verb -> ARGS
+  ARGS=()
+  case "$1:$2" in
+    claude:login)    ARGS=(auth login) ;;
+    claude:logout)   ARGS=(auth logout) ;;
+    codex:login)     ARGS=(login) ;;
+    codex:logout)    ARGS=(logout) ;;
+    opencode:login)  ARGS=(auth login) ;;
+    opencode:logout) ARGS=(auth logout) ;;
+    *) return 1 ;;
+  esac
+}
+
+# Locate the real agent binary: skip $AIENV_HOME/bin and any aienv shim copy.
+find_real_bin() { # app -> REPLY
+  local app=$1 p pa cand junk l2 shimdir="${AIENV_HOME:A}/bin"
+  REPLY=''
+  for p in ${(s.:.)PATH}; do
+    if [[ -z $p ]]; then p=$PWD; fi
+    pa=${p:A}
+    if [[ $pa == "$shimdir" ]]; then continue; fi
+    cand="$pa/$app"
+    if [[ ! -f $cand || ! -x $cand ]]; then continue; fi
+    junk=''; l2=''
+    { read -r junk; read -r l2 } < "$cand" 2>/dev/null || true
+    if [[ $l2 == '# aienv-shim' ]]; then continue; fi
+    REPLY=$cand
+    return 0
+  done
+  return 1
+}
+
+# Run an agent CLI with its config env var pointed at a store, bypassing the shim
+# by invoking the real binary directly. No marker variable is exported.
+app_run() { # app store args...
+  local app=$1 store=$2; shift 2
+  local var; app_env_var "$app"; var=$REPLY
+  if ! find_real_bin "$app"; then return 127; fi
+  local bin=$REPLY
+  app_key_vars "$app"
+  ( if (( ${#KEYVARS} )); then unset -v "${KEYVARS[@]}"; fi
+    export "$var=$store"
+    exec "$bin" "$@" )
+}
+
+sanitize() { # make a value safe as exactly one path component
+  local s=${1//[[:cntrl:]]/_}
+  s=${s//\//_}
+  case $s in
+    ''|.|..)  s='_' ;;
+    -)        ;;          # the canonical "org unknown" marker, kept as is
+    -*|.*)    s="_$s" ;;  # never a leading dash (option-like) or dot (hidden)
+  esac
+  REPLY=$s
+}
+
+# $AIENV_HOME/<app>/<org>/<email>; asserted to stay strictly under $AIENV_HOME/<app>.
+display_link() { # app org email -> REPLY path (dir created)
+  local base="$AIENV_HOME/$1" sorg semail dir
+  sanitize "$2"; sorg=$REPLY
+  sanitize "$3"; semail=$REPLY
+  if [[ $sorg == */* || $semail == */* ]]; then die "internal: unsafe display name"; fi
+  dir="$base/$sorg"
+  mkdir -p -- "$dir"
+  if [[ ${dir:A} != "${base:A}"/* ]]; then
+    die "refusing to create a display symlink outside $base"
+  fi
+  REPLY="$dir/$semail"
+}
+
+gen_id() {
+  local id=''
+  while :; do
+    id=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n') || id=''
+    if [[ -z $id ]]; then id="${RANDOM}${RANDOM}"; fi
+    if [[ ! -e $STORE_DIR/$id ]]; then break; fi
+  done
+  REPLY=$id
+}
+
+json_get() { # key json -> REPLY ('' when absent)
+  local key=$1 json=$2
+  REPLY=''
+  if (( HAVE_JQ )); then
+    REPLY=$(printf '%s' "$json" | jq -r --arg k "$key" \
+      'if type=="object" and has($k) and (.[$k]!=null) then (.[$k]|tostring) else empty end' 2>/dev/null) || true
+    return 0
+  fi
+  REPLY=$(printf '%s' "$json" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p") || true
+  if [[ -z $REPLY ]]; then
+    REPLY=$(printf '%s' "$json" | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\([A-Za-z0-9._-]*\).*/\1/p") || true
+  fi
+  REPLY=${REPLY%%$'\n'*}
+}
+
+meta_read() { # meta-file -> M_app M_org M_email
+  M_app=''; M_org='-'; M_email=''
+  local k='' v=''
+  while IFS='=' read -r k v || [[ -n $k ]]; do
+    case $k in
+      app)   M_app=${v%$'\r'} ;;
+      org)   M_org=${v%$'\r'} ;;
+      email) M_email=${v%$'\r'} ;;
+    esac
+  done < "$1"
+}
+
+meta_write() { # store app org email
+  { print -r -- "app=$2"; print -r -- "org=$3"; print -r -- "email=$4" } > "$1/.aienv-meta"
+}
+
+accounts_load() { # app -> ACC_IDS ACC_ORGS ACC_EMAILS
+  ACC_IDS=(); ACC_ORGS=(); ACC_EMAILS=()
+  local d
+  for d in "$STORE_DIR"/*(N/); do
+    if [[ ! -f $d/.aienv-meta ]]; then continue; fi
+    meta_read "$d/.aienv-meta"
+    if [[ $M_app != "$1" ]]; then continue; fi
+    ACC_IDS+=("${d:t}"); ACC_ORGS+=("$M_org"); ACC_EMAILS+=("$M_email")
+  done
+}
+
+account_label() { # app id -> REPLY 'org/email'
+  accounts_load "$1"
+  local i
+  REPLY=$2
+  for (( i=1; i<=${#ACC_IDS}; i++ )); do
+    if [[ ${ACC_IDS[i]} == "$2" ]]; then REPLY="${ACC_ORGS[i]}/${ACC_EMAILS[i]}"; fi
+  done
+}
+
+match_tier() { # match-string tier -> HITS indexes
+  local m=$1 tier=$2 i key
+  HITS=()
+  for (( i=1; i<=${#ACC_IDS}; i++ )); do
+    key="${ACC_ORGS[i]}/${ACC_EMAILS[i]}"
+    case $tier in
+      id)        if [[ ${ACC_IDS[i]} == "$m" ]]; then HITS+=("$i"); fi ;;
+      full)      if [[ $key == "$m" ]]; then HITS+=("$i"); fi ;;
+      email)     if [[ ${ACC_EMAILS[i]} == "$m" ]]; then HITS+=("$i"); fi ;;
+      substring) if [[ ${key:l} == *"${m:l}"* ]]; then HITS+=("$i"); fi ;;
+    esac
+  done
+}
+
+# Precedence: exact id > exact org/email > exact email > unique substring.
+select_account() { # app match -> REPLY id (exits on 0 or >1 hits)
+  local app=$1 m=$2 tier i
+  typeset -ga HITS=()
+  accounts_load "$app"
+  for tier in id full email substring; do
+    match_tier "$m" "$tier"
+    if (( ${#HITS} > 0 )); then break; fi
+  done
+  if (( ${#HITS} == 1 )); then REPLY=${ACC_IDS[${HITS[1]}]}; return 0; fi
+  if (( ${#HITS} == 0 )); then
+    print -ru2 -- "aienv: no $app account matches '$m'. candidates:"
+  else
+    print -ru2 -- "aienv: '$m' matches ${#HITS} $app accounts:"
+  fi
+  for (( i=1; i<=${#ACC_IDS}; i++ )); do
+    print -ru2 -- "  ${ACC_ORGS[i]}/${ACC_EMAILS[i]}  (${ACC_IDS[i]})"
+  done
+  exit 1
+}
+
+pick_number() { # count prompt -> REPLY index
+  local n=''
+  if ! read -r "n?$2"; then die "no selection"; fi
+  if [[ $n != <-> ]] || (( n < 1 || n > $1 )); then die "invalid selection: $n"; fi
+  REPLY=$n
+}
+
+pick_app() {
+  local app i
+  local -a avail=()
+  for app in $AIENV_APPS; do
+    accounts_load "$app"
+    if (( ${#ACC_IDS} > 0 )); then avail+=("$app"); fi
+  done
+  if (( ${#avail} == 0 )); then die "no accounts yet; run: aienv add <app>"; fi
+  if (( ${#avail} == 1 )); then REPLY=${avail[1]}; return 0; fi
+  for (( i=1; i<=${#avail}; i++ )); do print -r -- "  $i) ${avail[i]}"; done
+  pick_number ${#avail} 'app number: '
+  REPLY=${avail[$REPLY]}
+}
+
+pick_account() { # app -> REPLY id
+  local i
+  accounts_load "$1"
+  if (( ${#ACC_IDS} == 0 )); then die "no $1 accounts; run: aienv add $1"; fi
+  for (( i=1; i<=${#ACC_IDS}; i++ )); do print -r -- "  $i) ${ACC_ORGS[i]}/${ACC_EMAILS[i]}"; done
+  pick_number ${#ACC_IDS} 'account number: '
+  REPLY=${ACC_IDS[$REPLY]}
+}
+
+# --- lock / cleanup -----------------------------------------------------------
+
+lock_acquire() {
+  local n=0
+  local -a stale
+  mkdir -p -- "$AIENV_HOME"
+  while (( n < 20 )); do
+    if mkdir -- "$LOCK_DIR" 2>/dev/null; then LOCK_HELD=$LOCK_DIR; return 0; fi
+    stale=( "$LOCK_DIR"(Nms+10) )
+    if (( ${#stale} )); then rmdir -- "$LOCK_DIR" 2>/dev/null || true; fi
+    sleep 0.1
+    (( ++n ))
+  done
+  die "another aienv is holding $LOCK_DIR; retry shortly"
+}
+
+lock_release() {
+  if [[ -n $LOCK_HELD ]]; then rmdir -- "$LOCK_HELD" 2>/dev/null || true; LOCK_HELD=''; fi
+}
+
+add_cleanup() {
+  if [[ -n $ADD_STORE && -d $ADD_STORE ]]; then rm -rf -- "$ADD_STORE"; fi
+  ADD_STORE=''
+}
+
+cleanup() { lock_release; add_cleanup }
+
+trap 'cleanup' EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+# --- bindings -----------------------------------------------------------------
+
+filt_not_app_dir() { [[ $1 != "$FILT_APP" || $2 != "$FILT_DIR" ]] }
+filt_not_id()      { [[ $3 != "$FILT_ID" ]] }
+
+binding_rewrite() { # keep-filter [line-to-append]
+  lock_acquire
+  local tmp="$AIENV_HOME/.bindings.$$" a='' d='' i=''
+  : > "$tmp"
+  if [[ -f $BINDINGS ]]; then
+    while IFS=$'\t' read -r a d i || [[ -n $a ]]; do
+      a=${a%$'\r'}; d=${d%$'\r'}; i=${i%$'\r'}
+      if [[ -z $a || -z $d || -z $i ]]; then continue; fi
+      if "$1" "$a" "$d" "$i"; then printf '%s\t%s\t%s\n' "$a" "$d" "$i" >> "$tmp"; fi
+    done < "$BINDINGS"
+  fi
+  if (( $# > 1 )); then print -r -- "$2" >> "$tmp"; fi
+  mv -f -- "$tmp" "$BINDINGS"
+  lock_release
+}
+
+binding_set() { # app dir id
+  FILT_APP=$1; FILT_DIR=$2
+  binding_rewrite filt_not_app_dir "$1	$2	$3"
+}
+
+binding_unset() { # app dir
+  FILT_APP=$1; FILT_DIR=$2
+  binding_rewrite filt_not_app_dir
+}
+
+# Nearest ancestor wins; '/' matches everything; '*' is the fallback.
+# First line wins among duplicates. Sets R_ID R_SRC R_DIR R_DANGLING, REPLY.
+resolve_store() { # app dir
+  local app=$1 dir=$2 a='' d='' i='' dd='' best='' bestlen=-1 glob='' bestdir=''
+  REPLY=''; R_ID=''; R_SRC='none'; R_DIR=''; R_DANGLING=0
+  if [[ ! -f $BINDINGS ]]; then return 1; fi
+  while IFS=$'\t' read -r a d i || [[ -n $a ]]; do
+    a=${a%$'\r'}; d=${d%$'\r'}; i=${i%$'\r'}
+    if [[ -z $a || -z $d || -z $i || $a != "$app" ]]; then continue; fi
+    if [[ $d == '*' ]]; then
+      if [[ -z $glob ]]; then glob=$i; fi
+      continue
+    fi
+    dd=${d%/}
+    if [[ -z $dd || $dir == "$dd" || $dir == "$dd"/* ]]; then
+      if (( ${#d} > bestlen )); then bestlen=${#d}; best=$i; bestdir=$d; fi
+    fi
+  done < "$BINDINGS"
+  if [[ -n $best ]]; then
+    R_SRC='dir'; R_DIR=$bestdir
+  elif [[ -n $glob ]]; then
+    best=$glob; R_SRC='global'; R_DIR='*'
+  else
+    return 1
+  fi
+  R_ID=$best
+  if [[ ! -d $STORE_DIR/$best ]]; then R_DANGLING=1; return 1; fi
+  REPLY="$STORE_DIR/$best"
+}
+
+dangling_msg() { # app
+  print -ru2 -- "aienv: binding for $R_DIR points at missing account $R_ID; run: aienv switch $1"
+}
+
+# --- commands -----------------------------------------------------------------
+
+link_claude_shared() { # store
+  local item src
+  mkdir -p -- "$HOME/.claude/projects"
+  for item in $CLAUDE_SHARED; do
+    src="$HOME/.claude/$item"
+    if [[ -e $src && ! -e $1/$item && ! -L $1/$item ]]; then
+      ln -s -- "$src" "$1/$item"
+    fi
+  done
+}
+
+prompt_email() {
+  local v=''
+  if ! read -r "v?email for this account (blank = unknown): "; then v=''; fi
+  if [[ -z $v ]]; then v='unknown'; fi
+  ID_EMAIL=$v
+}
+
+detect_identity() { # app store -> ID_ORG ID_EMAIL, 1 when not logged in
+  local app=$1 store=$2 out='' li='' em='' og=''
+  ID_ORG='-'; ID_EMAIL=''
+  if [[ $app == claude ]]; then
+    out=$(app_run claude "$store" auth status --json 2>/dev/null) || out=''
+    if [[ -n $out ]]; then
+      json_get loggedIn "$out"; li=$REPLY
+      json_get email "$out";    em=$REPLY
+      json_get orgName "$out";  og=$REPLY
+      if [[ $li == false ]]; then return 1; fi
+      if [[ $li == true ]]; then
+        ID_EMAIL=$em
+        if [[ -n $og ]]; then ID_ORG=$og; fi
+        if [[ -z $ID_EMAIL ]]; then prompt_email; fi
+        return 0
+      fi
+    fi
+    warn "could not read 'claude auth status --json'; asking instead"
+    prompt_email
+    return 0
+  fi
+  if [[ $app == codex ]]; then
+    if ! app_run codex "$store" login status >/dev/null 2>&1; then return 1; fi
+  fi
+  prompt_email
+}
+
+reject_duplicate() { # app org email
+  local i
+  accounts_load "$1"
+  for (( i=1; i<=${#ACC_IDS}; i++ )); do
+    if [[ ${ACC_ORGS[i]} == "$2" && ${ACC_EMAILS[i]} == "$3" ]]; then
+      die "$1 account $2/$3 already exists (${ACC_IDS[i]}); run 'aienv remove $1 ${ACC_IDS[i]}' first"
+    fi
+  done
+}
+
+cmd_add() {
+  local app=${1-}
+  if [[ -z $app ]]; then usage_err 'usage: aienv add <app>'; fi
+  require_app "$app"
+  local var; app_env_var "$app"; var=$REPLY
+  mkdir -p -- "$STORE_DIR"
+  local id; gen_id; id=$REPLY
+  local store="$STORE_DIR/$id"
+  mkdir -p -- "$store"
+  ADD_STORE=$store            # cleanup trap removes it until meta is written
+  app_cmd "$app" login
+  print -ru2 -- "aienv: running '$app ${ARGS[*]}' with $var=$store"
+  local rc=0
+  app_run "$app" "$store" "${ARGS[@]}" || rc=$?
+  if (( rc != 0 )); then die "'$app ${ARGS[*]}' failed (exit $rc); nothing stored"; fi
+  if ! detect_identity "$app" "$store"; then die "$app reports no active login; nothing stored"; fi
+  reject_duplicate "$app" "$ID_ORG" "$ID_EMAIL"
+  meta_write "$store" "$app" "$ID_ORG" "$ID_EMAIL"
+  ADD_STORE=''
+  if [[ $app == claude ]]; then link_claude_shared "$store"; fi
+  display_link "$app" "$ID_ORG" "$ID_EMAIL"
+  local link=$REPLY
+  if [[ ! -L $link && -e $link ]]; then die "$link exists and is not a symlink; refusing to overwrite"; fi
+  ln -sfn -- "../../.store/$id" "$link"
+  print -r -- "added $app $ID_ORG/$ID_EMAIL ($id)"
+  print -r -- "bind it here with: aienv switch $app $id"
+}
+
+cmd_switch() {
+  local global=0 none=0 a
+  local -a pos=()
+  for a in "$@"; do
+    case $a in
+      --global|-g) global=1 ;;
+      --none)      none=1 ;;
+      -*)          usage_err "unknown option: $a" ;;
+      *)           pos+=("$a") ;;
+    esac
+  done
+  local dir='*'
+  if (( ! global )); then
+    dir=${PWD:A}
+    if [[ $dir == *$'\t'* || $dir == *$'\n'* ]]; then
+      die "the current directory contains a tab or newline; aienv cannot bind it"
+    fi
+  fi
+  local app=${pos[1]-}
+  if (( none )); then
+    if [[ -z $app ]]; then usage_err 'usage: aienv switch <app> --none'; fi
+    require_app "$app"
+    binding_unset "$app" "$dir"
+    print -r -- "unbound $app for $dir"
+    return 0
+  fi
+  if [[ -z $app ]]; then pick_app; app=$REPLY; fi
+  require_app "$app"
+  local id
+  if (( ${#pos} >= 2 )); then
+    select_account "$app" "${pos[2]}"; id=$REPLY
+  else
+    pick_account "$app"; id=$REPLY
+  fi
+  # Idempotent; also backfills shared items into stores made by older versions.
+  if [[ $app == claude ]]; then link_claude_shared "$STORE_DIR/$id"; fi
+  binding_set "$app" "$dir" "$id"
+  account_label "$app" "$id"
+  print -r -- "$app -> $REPLY for $dir"
+  # A binding only takes effect through the shim, and only at process start.
+  if first_in_path "$app" && [[ $REPLY != "${AIENV_HOME:A}/bin" ]]; then
+    warn "this shell runs $REPLY/$app, not the shim; run 'exec zsh' (or open a new terminal) first"
+  fi
+  local hint="restart them to apply"
+  if [[ $app == claude ]]; then hint="exit and run 'claude -c' to resume the conversation under the new account"; fi
+  print -ru2 -- "aienv: running $app sessions keep their account; $hint"
+}
+
+cmd_remove() {
+  local app=${1-} m=${2-}
+  if [[ -z $app || -z $m ]]; then usage_err 'usage: aienv remove <app> <match>'; fi
+  require_app "$app"
+  select_account "$app" "$m"
+  local id=$REPLY
+  account_label "$app" "$id"
+  local label=$REPLY org='' email='' i
+  for (( i=1; i<=${#ACC_IDS}; i++ )); do
+    if [[ ${ACC_IDS[i]} == "$id" ]]; then org=${ACC_ORGS[i]}; email=${ACC_EMAILS[i]}; fi
+  done
+  local ans=''
+  if ! read -r "ans?remove $app account $label ($id) and its config dir? [y/N] "; then ans=''; fi
+  if [[ ${ans:l} != y && ${ans:l} != yes ]]; then print -r -- 'aborted'; return 0; fi
+  local store="$STORE_DIR/$id"
+  app_cmd "$app" logout
+  if ! app_run "$app" "$store" "${ARGS[@]}" >/dev/null 2>&1; then
+    warn "'$app ${ARGS[*]}' failed or is unavailable; removing the local store anyway"
+  fi
+  rm -rf -- "$store"
+  display_link "$app" "$org" "$email"
+  local link=$REPLY
+  if [[ -L $link ]]; then rm -f -- "$link"; fi
+  rmdir -- "${link:h}" 2>/dev/null || true
+  rmdir -- "$AIENV_HOME/$app" 2>/dev/null || true
+  FILT_ID=$id
+  binding_rewrite filt_not_id
+  print -r -- "removed $app $label"
+}
+
+cmd_resolve() {
+  local app=${1-}
+  if [[ -z $app ]]; then usage_err 'usage: aienv resolve <app> [dir]'; fi
+  require_app "$app"
+  local dir=${2-$PWD}
+  if resolve_store "$app" "${dir:A}"; then print -r -- "$REPLY"; return 0; fi
+  if (( R_DANGLING )); then dangling_msg "$app"; fi
+  return 1
+}
+
+account_status() { # app store org email -> REPLY
+  local app=$1 store=$2 org=$3 email=$4 out='' li='' em='' og=''
+  REPLY='?'
+  case $app in
+    claude)
+      out=$(app_run claude "$store" auth status --json 2>/dev/null) || out=''
+      if [[ -z $out ]]; then return 0; fi
+      json_get loggedIn "$out"; li=$REPLY
+      json_get email "$out";    em=$REPLY
+      json_get orgName "$out";  og=$REPLY
+      REPLY='?'
+      if [[ $li == false ]]; then REPLY='logged-out'; fi
+      if [[ $li == true ]]; then
+        REPLY='logged-in'
+        if [[ -n $em && $em != "$email" ]] || [[ -n $og && $og != "$org" ]]; then
+          REPLY='logged-in MISMATCH'
+        fi
+      fi
+      ;;
+    codex)
+      if app_run codex "$store" login status >/dev/null 2>&1; then
+        REPLY='logged-in'
+      else
+        REPLY='logged-out/unknown'
+      fi
+      ;;
+  esac
+}
+
+show_app() { # app here nostatus
+  local app=$1 here=$2 nostatus=$3 i mark st src
+  src='none'
+  if resolve_store "$app" "$here"; then
+    if [[ $R_SRC == dir ]]; then src="dir: $R_DIR"; else src='global'; fi
+  elif (( R_DANGLING )); then
+    src="$R_DIR -> DANGLING $R_ID"
+  fi
+  print -r -- ""
+  print -r -- "$app  [$src]"
+  accounts_load "$app"
+  if (( ${#ACC_IDS} == 0 )); then print -r -- '  (no accounts)'; return 0; fi
+  for (( i=1; i<=${#ACC_IDS}; i++ )); do
+    mark=' '
+    if [[ ${ACC_IDS[i]} == "$R_ID" ]] && (( ! R_DANGLING )); then mark='*'; fi
+    st='-'
+    if (( ! nostatus )); then
+      account_status "$app" "$STORE_DIR/${ACC_IDS[i]}" "${ACC_ORGS[i]}" "${ACC_EMAILS[i]}"
+      st=$REPLY
+    fi
+    print -r -- "  $mark ${ACC_ORGS[i]}/${ACC_EMAILS[i]}  (${ACC_IDS[i]})  $st"
+  done
+}
+
+first_in_path() { # app -> REPLY dir
+  local p
+  REPLY=''
+  for p in ${(s.:.)PATH}; do
+    if [[ -z $p ]]; then p=$PWD; fi
+    if [[ -f $p/$1 && -x $p/$1 ]]; then REPLY=${p:A}; return 0; fi
+  done
+  return 1
+}
+
+show_warnings() {
+  setopt local_options unset
+  local -a w=()
+  local v app
+  for v in $ALL_KEY_VARS; do
+    if [[ -n ${(P)v} ]]; then
+      w+=("$v is set in this shell; it outranks the subscription login (value not shown)")
+    fi
+  done
+  if (( ! HAVE_JQ )); then w+=('jq not found; claude status parsing uses a reduced fallback'); fi
+  for app in $AIENV_APPS; do
+    if first_in_path "$app"; then
+      if [[ $REPLY != "${AIENV_HOME:A}/bin" ]]; then
+        w+=("$AIENV_HOME/bin is not ahead of $REPLY/$app in PATH; the shim will not run")
+      fi
+    fi
+  done
+  if (( ${#w} == 0 )); then return 0; fi
+  print -r -- ""
+  print -r -- "warnings:"
+  for v in $w; do print -r -- "  - $v"; done
+}
+
+cmd_show() {
+  local nostatus=0 a app
+  for a in "$@"; do
+    case $a in
+      --no-status) nostatus=1 ;;
+      *) usage_err "unknown option: $a" ;;
+    esac
+  done
+  local here=${PWD:A}
+  print -r -- "dir: $here"
+  for app in $AIENV_APPS; do show_app "$app" "$here" "$nostatus"; done
+  show_warnings
+}
+
+main() {
+  local cmd=${1-help}
+  if (( $# > 0 )); then shift; fi
+  case $cmd in
+    add)            cmd_add "$@" ;;
+    switch)         cmd_switch "$@" ;;
+    show)           cmd_show "$@" ;;
+    remove|rm)      cmd_remove "$@" ;;
+    resolve)        cmd_resolve "$@" ;;
+    help|-h|--help) usage ;;
+    *)              usage_err "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"
