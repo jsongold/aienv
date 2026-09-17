@@ -593,6 +593,25 @@ account_status() { # app store org email -> REPLY
   esac
 }
 
+# Identity of the agent's own login (no aienv store). Only claude reports one.
+default_identity() { # app -> ID_ORG ID_EMAIL, 1 when unknown
+  local out='' var
+  ID_ORG='-'; ID_EMAIL=''
+  if [[ $1 != claude ]]; then return 1; fi
+  if ! find_real_bin claude; then return 1; fi
+  local bin=$REPLY
+  app_env_var claude; var=$REPLY
+  app_key_vars claude
+  out=$( unset -v "$var" "${KEYVARS[@]}" 2>/dev/null
+         exec "$bin" auth status --json 2>/dev/null ) || out=''
+  if [[ -z $out ]]; then return 1; fi
+  json_get loggedIn "$out"
+  if [[ $REPLY != true ]]; then return 1; fi
+  json_get email "$out";   ID_EMAIL=$REPLY
+  json_get orgName "$out"; if [[ -n $REPLY ]]; then ID_ORG=$REPLY; fi
+  [[ -n $ID_EMAIL ]]
+}
+
 show_app() { # app here nostatus
   local app=$1 here=$2 nostatus=$3 i mark st src
   src='none'
@@ -605,19 +624,34 @@ show_app() { # app here nostatus
   print -r -- "$app  [$src]"
   accounts_load "$app"
   if (( ${#ACC_IDS} == 0 )); then print -r -- '  (no accounts)'; return 0; fi
+  # Nothing bound (or dangling): the agent runs with its own default login.
+  # When that login is identifiable, star the stored account it equals.
+  local unbound=0 defknown=0 starred=0
+  if [[ -z $R_ID ]] || (( R_DANGLING )); then
+    unbound=1
+    if (( ! nostatus )) && default_identity "$app"; then defknown=1; fi
+  fi
   for (( i=1; i<=${#ACC_IDS}; i++ )); do
     mark=' '
-    if [[ ${ACC_IDS[i]} == "$R_ID" ]] && (( ! R_DANGLING )); then mark='*'; fi
+    if (( ! unbound )); then
+      if [[ ${ACC_IDS[i]} == "$R_ID" ]]; then mark='*'; fi
+    elif (( defknown && ! starred )) && [[ ${ACC_ORGS[i]} == "$ID_ORG" && ${ACC_EMAILS[i]} == "$ID_EMAIL" ]]; then
+      mark='*'; starred=1
+    fi
     st='-'
     if (( ! nostatus )); then
       account_status "$app" "$STORE_DIR/${ACC_IDS[i]}" "${ACC_ORGS[i]}" "${ACC_EMAILS[i]}"
       st=$REPLY
     fi
+    if (( unbound )) && [[ $mark == '*' ]]; then st="$st  (via default login, unbound)"; fi
     print -r -- "  $mark ${ACC_ORGS[i]}/${ACC_EMAILS[i]}  (${ACC_IDS[i]})  $st"
   done
-  # Nothing bound (or dangling): the agent runs with its own default login.
-  if [[ -z $R_ID ]] || (( R_DANGLING )); then
-    print -r -- "  * (default $app login; not managed by aienv)"
+  if (( unbound && ! starred )); then
+    if (( defknown )); then
+      print -r -- "  * $ID_ORG/$ID_EMAIL  (default $app login; not managed by aienv)"
+    else
+      print -r -- "  * (default $app login; not managed by aienv)"
+    fi
   fi
 }
 
