@@ -281,11 +281,16 @@ pick_app() {
   REPLY=${avail[$REPLY]}
 }
 
-pick_account() { # app -> REPLY id
-  local i
+pick_account() { # app dir -> REPLY id ('*' marks the account active for dir)
+  local i mark
+  resolve_store "$1" "$2" || true
   accounts_load "$1"
   if (( ${#ACC_IDS} == 0 )); then die "no $1 accounts; run: aienv add $1"; fi
-  for (( i=1; i<=${#ACC_IDS}; i++ )); do print -r -- "  $i) ${ACC_ORGS[i]}/${ACC_EMAILS[i]}"; done
+  for (( i=1; i<=${#ACC_IDS}; i++ )); do
+    mark=' '
+    if [[ ${ACC_IDS[i]} == "$R_ID" ]] && (( ! R_DANGLING )); then mark='*'; fi
+    print -r -- "$mark $i) ${ACC_ORGS[i]}/${ACC_EMAILS[i]}"
+  done
   pick_number ${#ACC_IDS} 'account number: '
   REPLY=${ACC_IDS[$REPLY]}
 }
@@ -503,7 +508,7 @@ cmd_switch() {
   if (( ${#pos} >= 2 )); then
     select_account "$app" "${pos[2]}"; id=$REPLY
   else
-    pick_account "$app"; id=$REPLY
+    pick_account "$app" "$dir"; id=$REPLY
   fi
   # Idempotent; also backfills shared items into stores made by older versions.
   if [[ $app == claude ]]; then link_claude_shared "$STORE_DIR/$id"; fi
@@ -610,6 +615,10 @@ show_app() { # app here nostatus
     fi
     print -r -- "  $mark ${ACC_ORGS[i]}/${ACC_EMAILS[i]}  (${ACC_IDS[i]})  $st"
   done
+  # Nothing bound (or dangling): the agent runs with its own default login.
+  if [[ -z $R_ID ]] || (( R_DANGLING )); then
+    print -r -- "  * (default $app login; not managed by aienv)"
+  fi
 }
 
 first_in_path() { # app -> REPLY dir
