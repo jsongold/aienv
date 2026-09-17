@@ -9,6 +9,9 @@ unset ZDOTDIR
 ROOT=${0:A:h:h}
 typeset -g PASSN=0 FAILN=0
 
+# The suite trims PATH below; pin node for install.sh and the launcher it writes.
+export AIENV_NODE=${AIENV_NODE:-$(command -v node)}
+
 ok()  { print -r -- "PASS $1"; (( PASSN++ )); return 0 }
 ng()  { print -r -- "FAIL $1 -- ${2-}"; (( FAILN++ )); return 0 }
 chk() { if (( $2 )); then ok "$1"; else ng "$1" "${3-}"; fi }

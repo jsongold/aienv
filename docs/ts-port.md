@@ -21,14 +21,14 @@ dependency-free). On-disk layout is unchanged so existing installs keep working:
       step, zero runtime dependencies. Erasable syntax only (no `enum`, no parameter
       properties, no `namespace`). ESM, relative imports with explicit `.ts` extension.
 - [x] Module contract (below)
-- [ ] Q1 `src/store.ts` + `tests/unit/store.test.ts`
-- [ ] Q2 `src/bindings.ts` + `tests/unit/bindings.test.ts`
-- [ ] Q3 `src/agents.ts` + `tests/unit/agents.test.ts`
-- [ ] Q4 `src/commands.ts`, `src/cli.ts`
-- [ ] Integrate: `install.sh` installs `src/` to `$AIENV_HOME/lib/aienv/` and writes a
+- [x] Q1 `src/store.ts` + `tests/unit/store.test.ts`
+- [x] Q2 `src/bindings.ts` + `tests/unit/bindings.test.ts`
+- [x] Q3 `src/agents.ts` + `tests/unit/agents.test.ts`
+- [x] Q4 `src/commands.ts`, `src/cli.ts`
+- [x] Integrate: `install.sh` installs `src/` to `$AIENV_HOME/lib/aienv/` and writes a
       launcher `$AIENV_HOME/bin/aienv` that execs an absolute node path
-- [ ] Acceptance: `zsh tests/run.zsh` PASS against the TS CLI; `node --test tests/unit/`
-- [ ] `tsc --noEmit` clean; README updated; zsh `aienv` moved to `legacy/aienv.zsh`
+- [x] Acceptance: `zsh tests/run.zsh` PASS against the TS CLI; `node --test tests/unit/`
+- [x] `tsc --noEmit` clean; README updated; zsh `aienv` moved to `legacy/aienv.zsh`
 
 ## Hard rules (every module)
 

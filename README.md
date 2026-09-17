@@ -1,8 +1,9 @@
 # aienv
 
 Per-directory switching of the logged-in **subscription** account for coding-agent
-CLIs (`claude`, `codex`, `opencode`). Pure zsh + macOS system tools, no third-party
-dependencies.
+CLIs (`claude`, `codex`, `opencode`). TypeScript CLI run directly by Node >= 24 plus zsh
+shims; no runtime dependencies.
+
 
 aienv never reads, writes, copies or prints tokens, credential files or Keychain
 entries. API keys are out of scope: they are only ever named in warnings, never used.
@@ -14,8 +15,12 @@ git clone <this repo> ~/src/aienv
 zsh ~/src/aienv/install.sh
 ```
 
-The installer creates `$AIENV_HOME` (default `~/.aienv`), installs `aienv` and the
-shims, and prints the PATH line to add. It never edits `~/.zshrc`:
+Requires Node >= 24 (the CLI is TypeScript run directly by Node; no build step, no
+runtime dependencies) and zsh (the shims). The installer creates `$AIENV_HOME`
+(default `~/.aienv`), copies `src/*.ts` to `$AIENV_HOME/lib/aienv/`, writes the
+`aienv` launcher and the shims, and prints the PATH line to add. The launcher pins the
+node path found at install time (override with `AIENV_NODE=/path/to/node`). It never
+edits `~/.zshrc`:
 
 ```sh
 export PATH="$HOME/.aienv/bin:$PATH"
@@ -51,7 +56,7 @@ carries the stable `.store/<id>` path.
 
 For `claude`, shared non-credential items (`CLAUDE.md`, `settings.json`, `skills`,
 `agents`, `commands`, `hooks`, `rules`, `keybindings.json`, `projects`) are symlinked
-from `~/.claude` into a store (the list is one array at the top of `aienv`).
+from `~/.claude` into a store (the list is `CLAUDE_SHARED` in `src/store.ts`).
 Credentials, `.claude.json` and history are never linked or copied.
 
 `projects` (conversation transcripts) is shared so a switch keeps the conversation:
@@ -77,16 +82,21 @@ A running `claude` keeps the account it started with; the binding applies at lau
 - `opencode` is relocated through `XDG_DATA_HOME`, which is a general-purpose
   variable: every tool `opencode` spawns inherits it and will look for its own data
   under the store directory. Bind `opencode` only where that is acceptable.
-- `codex` and `opencode` expose no email/org, so `aienv add` asks for a label.
+- `codex` reports its email through its app-server (`account/read`), which aienv
+  asks; it reports no org. `opencode` exposes neither, so `aienv add` asks for a label.
 - If a binding points at an account whose store is gone, the shim refuses to launch
   the agent rather than silently using the default account. Re-run `aienv switch`.
-- `aienv show` calls each agent's status command without a timeout, so a hung or
-  very slow agent binary makes `show` hang. Use `aienv show --no-status`.
+- `aienv show` asks each agent for its status (30s timeout per call, 10s for the
+  codex identity lookup). Use `aienv show --no-status` to skip all of it.
 
 ## Tests
 
 ```sh
-zsh tests/run.zsh
+npm install          # dev only: typescript, @types/node
+npm test             # typecheck + unit tests + acceptance suite
+zsh tests/run.zsh    # acceptance suite alone
 ```
 
 Runs against a temp `AIENV_HOME` with fake agent binaries. No network, no real login.
+
+The zsh CLI this was ported from is kept at `legacy/aienv.zsh` as the behavioral spec.
