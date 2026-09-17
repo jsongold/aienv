@@ -78,6 +78,14 @@ if [[ ${1-} == login ]]; then
   mkdir -p -- "$CODEX_HOME"; exit 0
 fi
 if [[ ${1-} == logout ]]; then exit 0; fi
+if [[ ${1-} == app-server && -n ${FAKE_CODEX_EMAIL-} ]]; then
+  while read -r line; do
+    if [[ $line == *'"account/read"'* ]]; then
+      print -r -- "{\"id\":2,\"result\":{\"account\":{\"type\":\"chatgpt\",\"email\":\"$FAKE_CODEX_EMAIL\",\"planType\":\"plus\"},\"requiresOpenaiAuth\":false}}"
+    fi
+  done
+  exit 0
+fi
 print -r -- "CODEX_HOME=${CODEX_HOME-unset}"
 print -r -- "OKEY=${OPENAI_API_KEY-unset}"
 print -r -- "OTOK=${CODEX_ACCESS_TOKEN-unset}"
@@ -375,6 +383,18 @@ chk remove-keeps-shared-org-dir "$([[ -L $LNK_B ]] && print 1 || print 0)"
 
 "$AIENV" bogus >/dev/null 2>&1; rc=$?
 chk unknown-command-exit2 "$(( rc == 2 ))" "rc=$rc"
+# --- codex identity via app-server ---------------------------------------------
+
+FAKE_CODEX_EMAIL='auto@example.com' "$AIENV" add codex </dev/null >/dev/null 2>&1
+chk codex-add-detects-email "$([[ -L $AIENV_HOME/codex/-/auto@example.com ]] && print 1 || print 0)"
+print -r -- '' | "$AIENV" add codex >/dev/null 2>&1
+chk codex-add-blank-is-unknown "$([[ -L $AIENV_HOME/codex/-/unknown ]] && print 1 || print 0)"
+out=$(FAKE_CODEX_EMAIL='late@example.com' "$AIENV" show 2>&1)
+has codex-show-heals-unknown "$out" '-/late@example.com'
+chk codex-heal-moves-link "$([[ -L $AIENV_HOME/codex/-/late@example.com && ! -L $AIENV_HOME/codex/-/unknown ]] && print 1 || print 0)"
+out=$(FAKE_CODEX_EMAIL='other@example.com' "$AIENV" show 2>&1)
+has codex-show-mismatch "$out" 'logged-in MISMATCH'
+
 chk no-lock-left-behind "$([[ ! -d $AIENV_HOME/.lock ]] && print 1 || print 0)"
 
 print -r -- ""

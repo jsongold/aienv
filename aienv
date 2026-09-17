@@ -411,6 +411,37 @@ prompt_email() {
   ID_EMAIL=$v
 }
 
+# Ask codex itself who is logged in, over its app-server stdio JSON-RPC
+# ('account/read'). aienv never opens auth.json; codex reports only the email.
+codex_email() { # store -> REPLY ('' when unavailable)
+  local store=$1 line='' pid='' n=0
+  REPLY=''
+  if ! find_real_bin codex; then REPLY=''; return 0; fi
+  REPLY=''
+  coproc app_run codex "$store" app-server 2>/dev/null
+  pid=$!
+  # An older codex may exit at once; writing to it must not kill aienv.
+  setopt local_traps
+  trap '' PIPE
+  { print -rp -- '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"aienv","title":"aienv","version":"0"}}}'
+    print -rp -- '{"method":"initialized"}'
+    print -rp -- '{"id":2,"method":"account/read","params":{"refreshToken":false}}'
+  } 2>/dev/null || true
+  while (( n++ < 50 )) && read -r -p -t 10 line; do
+    if [[ $line != *'"id":2'* ]]; then continue; fi
+    if (( HAVE_JQ )); then
+      REPLY=$(printf '%s' "$line" | jq -r '.result.account.email // empty' 2>/dev/null) || REPLY=''
+    else
+      REPLY=$(printf '%s' "$line" | sed -n 's/.*"email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p') || REPLY=''
+    fi
+    break
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  REPLY=${REPLY//[[:cntrl:]]/}
+  return 0
+}
+
 detect_identity() { # app store -> ID_ORG ID_EMAIL, 1 when not logged in
   local app=$1 store=$2 out='' li='' em='' og=''
   ID_ORG='-'; ID_EMAIL=''
@@ -434,6 +465,8 @@ detect_identity() { # app store -> ID_ORG ID_EMAIL, 1 when not logged in
   fi
   if [[ $app == codex ]]; then
     if ! app_run codex "$store" login status >/dev/null 2>&1; then return 1; fi
+    codex_email "$store"
+    if [[ -n $REPLY ]]; then ID_EMAIL=$REPLY; return 0; fi
   fi
   prompt_email
 }
@@ -564,6 +597,23 @@ cmd_resolve() {
   return 1
 }
 
+# Re-label a store: rewrite its meta and move the display symlink. 1 on conflict.
+rename_account() { # app store org old-email new-email
+  local app=$1 store=$2 org=$3 old=$4 new=$5 i oldlink
+  accounts_load "$app"
+  for (( i=1; i<=${#ACC_IDS}; i++ )); do
+    if [[ ${ACC_ORGS[i]} == "$org" && ${ACC_EMAILS[i]} == "$new" ]]; then return 1; fi
+  done
+  display_link "$app" "$org" "$old"; oldlink=$REPLY
+  display_link "$app" "$org" "$new"
+  if [[ -e $REPLY && ! -L $REPLY ]]; then return 1; fi
+  meta_write "$store" "$app" "$org" "$new"
+  ln -sfn -- "../../.store/${store:t}" "$REPLY"
+  if [[ -L $oldlink ]]; then rm -f -- "$oldlink"; fi
+  accounts_load "$app"   # callers iterating ACC_* see the new label
+  return 0
+}
+
 account_status() { # app store org email -> REPLY
   local app=$1 store=$2 org=$3 email=$4 out='' li='' em='' og=''
   REPLY='?'
@@ -585,7 +635,14 @@ account_status() { # app store org email -> REPLY
       ;;
     codex)
       if app_run codex "$store" login status >/dev/null 2>&1; then
+        codex_email "$store"; em=$REPLY
         REPLY='logged-in'
+        if [[ -n $em && $email == unknown ]]; then
+          # Stored before aienv could ask codex: adopt the reported email.
+          if rename_account codex "$store" "$org" "$email" "$em"; then REPLY="logged-in  (email detected: $em)"; fi
+        elif [[ -n $em && $em != "$email" ]]; then
+          REPLY='logged-in MISMATCH'
+        fi
       else
         REPLY='logged-out/unknown'
       fi
@@ -597,6 +654,11 @@ account_status() { # app store org email -> REPLY
 default_identity() { # app -> ID_ORG ID_EMAIL, 1 when unknown
   local out='' var
   ID_ORG='-'; ID_EMAIL=''
+  if [[ $1 == codex ]]; then
+    codex_email "${CODEX_HOME:-$HOME/.codex}"   # codex's own default home
+    ID_EMAIL=$REPLY
+    [[ -n $ID_EMAIL ]]; return
+  fi
   if [[ $1 != claude ]]; then return 1; fi
   if ! find_real_bin claude; then return 1; fi
   local bin=$REPLY
