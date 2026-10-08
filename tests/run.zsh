@@ -355,10 +355,16 @@ has althome-shim-derives-home "$out" "CFG=$ALT/.store/$ID_Z"
 
 # --- show ---------------------------------------------------------------------
 
+FAKE_ORG="p@example.com's Organization" FAKE_EMAIL='p@example.com' "$AIENV" add claude >/dev/null 2>&1
+ID_P=$(readlink -- "$AIENV_HOME/claude/p@example.com's Organization/p@example.com"); ID_P=${ID_P:t}
 out=$( cd "$WORK"; "$AIENV" show --no-status 2>&1 ); rc=$?
 chk show-runs "$(( rc == 0 ))" "rc=$rc"
-has show-marks-active "$out" "* Acme Org/a@example.com"
+has show-marks-active "$out" "* Acme Org"
 has show-prints-id "$out" "($ID_A)"
+hasnt show-hides-email-in-label "$out" "Acme Org/a@example.com"
+has show-personal-org-shows-domain "$out" "example.com  ($ID_P)"
+hasnt show-hides-personal-org "$out" "'s Organization"
+has show-no-org-shows-domain "$out" "example.com  ($ID_C)"
 has show-binding-source "$out" "dir: $WORK"
 out=$( cd "$WORK"; ANTHROPIC_API_KEY=sk-secret-value CLAUDE_CODE_OAUTH_TOKEN=oauth-secret "$AIENV" show --no-status 2>&1 )
 has show-warns-api-key "$out" 'ANTHROPIC_API_KEY is set'
@@ -393,7 +399,7 @@ chk codex-add-detects-email "$([[ -L $AIENV_HOME/codex/-/auto@example.com ]] && 
 print -r -- '' | "$AIENV" add codex >/dev/null 2>&1
 chk codex-add-blank-is-unknown "$([[ -L $AIENV_HOME/codex/-/unknown ]] && print 1 || print 0)"
 out=$(FAKE_CODEX_EMAIL='late@example.com' "$AIENV" show 2>&1)
-has codex-show-heals-unknown "$out" '-/late@example.com'
+has codex-show-heals-unknown "$out" 'email detected: late@example.com'
 chk codex-heal-moves-link "$([[ -L $AIENV_HOME/codex/-/late@example.com && ! -L $AIENV_HOME/codex/-/unknown ]] && print 1 || print 0)"
 out=$(FAKE_CODEX_EMAIL='other@example.com' "$AIENV" show 2>&1)
 has codex-show-mismatch "$out" 'logged-in MISMATCH'

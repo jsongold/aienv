@@ -394,6 +394,17 @@ async function collectApp(ctx: Ctx, app: App, dir: string, noStatus: boolean): P
   };
 }
 
+/**
+ * The account label `show` prints: the org name, or the email's domain when the
+ * org says nothing (codex/opencode store `-`; a personal claude org is just
+ * `<email>'s Organization`).
+ */
+function showLabel(org: string, email: string): string {
+  if (org !== '' && org !== '-' && org !== `${email}'s Organization`) return org;
+  const at = email.indexOf('@');
+  return at === -1 ? email : email.slice(at + 1);
+}
+
 function showApp(ctx: Ctx, r: AppReport): void {
   out('');
   out(`${r.app}  [${r.src}]`);
@@ -425,7 +436,7 @@ function showApp(ctx: Ctx, r: AppReport): void {
         }
       }
     }
-    rows.push({ mark, label: `${acc.org}/${email}`, id: `(${acc.id})`, st });
+    rows.push({ mark, label: showLabel(acc.org, email), id: `(${acc.id})`, st });
   });
   const labelW = Math.max(...rows.map((row) => row.label.length));
   const idW = Math.max(...rows.map((row) => row.id.length));
