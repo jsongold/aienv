@@ -358,7 +358,7 @@ function showApp(r: AppReport): void {
     out('  (no accounts)');
     return;
   }
-  const rows: { mark: string; label: string; id: string; st: string }[] = [];
+  const rows: { mark: string; label: string; email: string; id: string; st: string }[] = [];
   let starred = false;
   r.accounts.forEach((acc, i) => {
     let mark = ' ';
@@ -368,13 +368,16 @@ function showApp(r: AppReport): void {
       mark = '*';
       starred = true;
     }
-    const st = r.statuses === null ? '-' : r.statuses[i]!;
-    rows.push({ mark, label: showLabel(acc.org, acc.email), id: `(${acc.id})`, st });
+    // The plain `logged-in` is the expected state, so only the other statuses are shown.
+    const raw = r.statuses === null ? '' : r.statuses[i]!;
+    const st = raw === 'logged-in' ? '' : raw;
+    rows.push({ mark, label: showLabel(acc.org, acc.email), email: acc.email, id: `(${acc.id})`, st });
   });
   const labelW = Math.max(...rows.map((row) => row.label.length));
-  const idW = Math.max(...rows.map((row) => row.id.length));
+  const emailW = Math.max(...rows.map((row) => row.email.length));
   for (const row of rows) {
-    out(`  ${row.mark} ${row.label.padEnd(labelW)}  ${row.id.padEnd(idW)}  ${row.st}`);
+    const head = `  ${row.mark} ${row.label.padEnd(labelW)}  ${row.email.padEnd(emailW)}  ${row.id}`;
+    out(row.st === '' ? head : `${head}  ${row.st}`);
   }
 }
 

@@ -18,6 +18,7 @@ chk() { if (( $2 )); then ok "$1"; else ng "$1" "${3-}"; fi }
 aeq() { if [[ "$2" == "$3" ]]; then ok "$1"; else ng "$1" "want=[$2] got=[$3]"; fi }
 has() { if [[ "$2" == *"$3"* ]]; then ok "$1"; else ng "$1" "missing [$3] in [$2]"; fi }
 hasnt() { if [[ "$2" != *"$3"* ]]; then ok "$1"; else ng "$1" "unexpected [$3]"; fi }
+rx() { if [[ "$2" =~ $3 ]]; then ok "$1"; else ng "$1" "no match for /$3/ in [$2]"; fi }
 stores() { local -a s=( "$AIENV_HOME"/.store/*(N/) ); print -r -- ${#s} }
 # shimcfg <dir> [app]: the store the shim hands the agent in dir ('unset' when unbound)
 shimcfg() {
@@ -354,11 +355,12 @@ ID_P=$(idof claude "p@example.com's Organization" p@example.com)
 out=$( cd "$WORK"; "$AIENV" show --no-status 2>&1 ); rc=$?
 chk show-runs "$(( rc == 0 ))" "rc=$rc"
 has show-marks-active "$out" "* Acme Org"
-has show-prints-id "$out" "($ID_A)"
+rx show-prints-email-and-id "$out" "Acme Org +a@example.com +\\($ID_A\\)"
+hasnt show-no-status-prints-nothing "$out" "($ID_A) "
 hasnt show-hides-email-in-label "$out" "Acme Org/a@example.com"
-has show-personal-org-shows-domain "$out" "example.com  ($ID_P)"
+rx show-personal-org-shows-domain "$out" "example.com +p@example.com +\\($ID_P\\)"
 hasnt show-hides-personal-org "$out" "'s Organization"
-has show-no-org-shows-domain "$out" "example.com  ($ID_C)"
+rx show-no-org-shows-domain "$out" "example.com +c@example.com +\\($ID_C\\)"
 has show-binding-source "$out" "dir: $WORK"
 out=$( cd "$WORK"; ANTHROPIC_API_KEY=sk-secret-value CLAUDE_CODE_OAUTH_TOKEN=oauth-secret "$AIENV" show --no-status 2>&1 )
 has show-warns-api-key "$out" 'ANTHROPIC_API_KEY is set'
@@ -393,7 +395,8 @@ ID_U=$(idof codex - unknown)
 chk codex-add-blank-is-unknown "$([[ -n $ID_U ]] && print 1 || print 0)"
 out=$(FAKE_CODEX_EMAIL='other@example.com' "$AIENV" show 2>&1)
 has codex-show-mismatch "$out" 'logged-in MISMATCH'
-has codex-show-unknown-not-mismatch "$out" "(${ID_U})  logged-in"
+has codex-show-unknown-row "$out" "(${ID_U})"
+hasnt codex-show-hides-logged-in "$out" "(${ID_U}) "
 
 print -r -- ""
 print -r -- "passed: $PASSN  failed: $FAILN"
