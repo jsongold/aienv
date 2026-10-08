@@ -8,12 +8,10 @@ import {
   CLAUDE_SHARED,
   accountLabel,
   accountsLoad,
-  displayLinkPath,
   genId,
   linkClaudeShared,
   metaRead,
   metaWrite,
-  sanitize,
   selectAccount,
 } from '../../src/store.ts';
 import { AienvError } from '../../src/types.ts';
@@ -52,35 +50,6 @@ function throwsAienv(fn: () => unknown, message: string): void {
     return true;
   });
 }
-
-// --- sanitize ------------------------------------------------------------------
-
-test('sanitize: plain values pass through', () => {
-  assert.equal(sanitize('me@example.com'), 'me@example.com');
-  assert.equal(sanitize('Acme Inc'), 'Acme Inc');
-  assert.equal(sanitize('a.b-c'), 'a.b-c');
-});
-
-test('sanitize: control chars and slashes become _', () => {
-  assert.equal(sanitize('a\tb\nc\x7fd\x00e'), 'a_b_c_d_e');
-  assert.equal(sanitize('a/b//c'), 'a_b__c');
-  assert.equal(sanitize('../../etc'), '_.._.._etc');
-  assert.equal(sanitize('/'), '_');
-});
-
-test('sanitize: empty, dot and dotdot become _', () => {
-  assert.equal(sanitize(''), '_');
-  assert.equal(sanitize('.'), '_');
-  assert.equal(sanitize('..'), '_');
-});
-
-test('sanitize: lone dash kept, leading dash or dot prefixed', () => {
-  assert.equal(sanitize('-'), '-');
-  assert.equal(sanitize('--'), '_--');
-  assert.equal(sanitize('-rf'), '_-rf');
-  assert.equal(sanitize('.hidden'), '_.hidden');
-  assert.equal(sanitize('...'), '_...');
-});
 
 // --- genId ---------------------------------------------------------------------
 
@@ -271,45 +240,6 @@ test('selectAccount: ambiguous substring', (t) => {
       '  -/Solo@Example.org  (cccc0003)',
     ].join('\n'),
   );
-});
-
-// --- displayLinkPath -----------------------------------------------------------
-
-test('displayLinkPath: creates the org dir and returns the sanitized path', (t) => {
-  const { ctx } = mkCtx(t);
-  const link = displayLinkPath(ctx, 'claude', 'Acme/Inc', '.me@example.com');
-  assert.equal(link, `${ctx.home}/claude/Acme_Inc/_.me@example.com`);
-  assert.ok(fs.statSync(`${ctx.home}/claude/Acme_Inc`).isDirectory());
-  assert.equal(fs.lstatSync(link, { throwIfNoEntry: false }), undefined);
-  assert.equal(displayLinkPath(ctx, 'codex', '-', 'unknown'), `${ctx.home}/codex/-/unknown`);
-  // traversal attempts collapse into one component
-  assert.equal(displayLinkPath(ctx, 'codex', '..', '../x'), `${ctx.home}/codex/_/_.._x`);
-});
-
-test('displayLinkPath: refuses an org dir that is a symlink pointing outside', (t) => {
-  const { ctx, tmp } = mkCtx(t);
-  const outside = path.join(tmp, 'outside');
-  fs.mkdirSync(outside);
-  fs.mkdirSync(`${ctx.home}/claude`);
-  fs.symlinkSync(outside, `${ctx.home}/claude/Evil`);
-  throwsAienv(
-    () => displayLinkPath(ctx, 'claude', 'Evil', 'me@example.com'),
-    `refusing to create a display symlink outside ${ctx.home}/claude`,
-  );
-  // a symlink back to the base itself is not strictly inside either
-  fs.symlinkSync('.', `${ctx.home}/claude/Self`);
-  throwsAienv(
-    () => displayLinkPath(ctx, 'claude', 'Self', 'me@example.com'),
-    `refusing to create a display symlink outside ${ctx.home}/claude`,
-  );
-});
-
-test('displayLinkPath: works when AIENV_HOME itself is reached through a symlink', (t) => {
-  const { ctx, tmp } = mkCtx(t);
-  const alias = path.join(tmp, 'alias');
-  fs.symlinkSync(ctx.home, alias);
-  const ctx2: Ctx = { ...ctx, home: alias, storeDir: `${alias}/.store` };
-  assert.equal(displayLinkPath(ctx2, 'claude', 'Acme', 'a@example.com'), `${alias}/claude/Acme/a@example.com`);
 });
 
 // --- linkClaudeShared ----------------------------------------------------------

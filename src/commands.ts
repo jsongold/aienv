@@ -11,7 +11,6 @@ import type { Account, App, Ctx, Identity } from './types.ts';
 import {
   accountLabel,
   accountsLoad,
-  displayLinkPath,
   genId,
   linkClaudeShared,
   metaWrite,
@@ -242,11 +241,6 @@ export async function cmdAdd(ctx: Ctx, args: string[]): Promise<number> {
   }
 
   if (app === 'claude') linkClaudeShared(ctx, store);
-  const link = displayLinkPath(ctx, app, identity.org, identity.email);
-  const st = fs.lstatSync(link, { throwIfNoEntry: false });
-  if (st && !st.isSymbolicLink()) die(`${link} exists and is not a symlink; refusing to overwrite`);
-  if (st) fs.unlinkSync(link);
-  fs.symlinkSync(`../../.store/${id}`, link);
   out(`added ${app} ${identity.org}/${identity.email} (${id})`);
   out(`bind it here with: aienv switch ${app} ${id}`);
   return 0;
@@ -320,17 +314,6 @@ export async function cmdRemove(ctx: Ctx, args: string[]): Promise<number> {
     warn(`'${app} ${logout.join(' ')}' failed or is unavailable; removing the local store anyway`);
   }
   fs.rmSync(store, { recursive: true, force: true });
-  const link = displayLinkPath(ctx, app, acc.org, acc.email);
-  if (fs.lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink()) {
-    fs.rmSync(link, { force: true });
-  }
-  for (const d of [path.dirname(link), path.join(ctx.home, app)]) {
-    try {
-      fs.rmdirSync(d);
-    } catch {
-      // not empty (or already gone): keep it
-    }
-  }
   bindingsRemoveId(ctx, acc.id);
   out(`removed ${app} ${label}`);
   return 0;
