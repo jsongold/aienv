@@ -1,18 +1,12 @@
-// Bindings file ($AIENV_HOME/bindings, TSV: app<TAB>dir<TAB>id) and the mkdir lock.
-// Spec: lock_acquire, lock_release, binding_rewrite, binding_set, binding_unset,
-// filt_not_id (cmd_remove) and resolve_store in the zsh `aienv`.
+// Bindings file ($AIENV_HOME/bindings, TSV: app<TAB>dir<TAB>id). Rewrites go through a
+// temp file + rename, so readers (the shim) never see a torn file.
 
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { AienvError } from './types.ts';
 import type { App, Ctx, Resolution } from './types.ts';
 
 export type Binding = { app: string; dir: string; id: string };
-
-const LOCK_TRIES = 20;
-const LOCK_WAIT_MS = 100;
-const LOCK_STALE_MS = 10_000;
 
 function stripCr(value: string): string {
   return value.endsWith('\r') ? value.slice(0, -1) : value;
@@ -50,83 +44,6 @@ export function readBindings(ctx: Ctx): Binding[] {
   return out;
 }
 
-// --- lock -------------------------------------------------------------------
-
-function pidFile(ctx: Ctx): string {
-  return path.join(ctx.lockDir, 'pid');
-}
-
-function sleepMs(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-function removeLock(ctx: Ctx): void {
-  try {
-    fs.unlinkSync(pidFile(ctx));
-  } catch {
-    // no pid file (e.g. a lock taken by the zsh CLI)
-  }
-  try {
-    fs.rmdirSync(ctx.lockDir);
-  } catch {
-    // already gone, or not ours to remove
-  }
-}
-
-function lockIsStale(ctx: Ctx): boolean {
-  try {
-    return Date.now() - fs.statSync(ctx.lockDir).mtimeMs > LOCK_STALE_MS;
-  } catch {
-    return false;
-  }
-}
-
-function lockAcquire(ctx: Ctx): void {
-  fs.mkdirSync(ctx.home, { recursive: true });
-  for (let n = 0; n < LOCK_TRIES; n++) {
-    let made = false;
-    try {
-      fs.mkdirSync(ctx.lockDir);
-      made = true;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-    }
-    if (made) {
-      try {
-        fs.writeFileSync(pidFile(ctx), `${process.pid}\n`);
-      } catch (err) {
-        removeLock(ctx);
-        throw err;
-      }
-      return;
-    }
-    if (lockIsStale(ctx)) removeLock(ctx);
-    sleepMs(LOCK_WAIT_MS);
-  }
-  throw new AienvError(`another aienv is holding ${ctx.lockDir}; retry shortly`);
-}
-
-/** Release the lock only when this process holds it (pid marker inside the lock dir).
- *  Safe to call from signal handlers and when no lock exists. */
-export function releaseLockIfHeld(ctx: Ctx): void {
-  let owner: string;
-  try {
-    owner = fs.readFileSync(pidFile(ctx), 'utf8').trim();
-  } catch {
-    return;
-  }
-  if (owner === String(process.pid)) removeLock(ctx);
-}
-
-export function withLock<T>(ctx: Ctx, fn: () => T): T {
-  lockAcquire(ctx);
-  try {
-    return fn();
-  } finally {
-    releaseLockIfHeld(ctx);
-  }
-}
-
 // --- rewrite ----------------------------------------------------------------
 
 function formatLine(b: Binding): string {
@@ -134,22 +51,21 @@ function formatLine(b: Binding): string {
 }
 
 function rewrite(ctx: Ctx, keep: (b: Binding) => boolean, append?: Binding): void {
-  withLock(ctx, () => {
-    const tmp = path.join(ctx.home, `.bindings.${process.pid}`);
-    const kept = readBindings(ctx).filter(keep);
-    if (append) kept.push(append);
+  fs.mkdirSync(ctx.home, { recursive: true });
+  const tmp = path.join(ctx.home, `.bindings.${process.pid}`);
+  const kept = readBindings(ctx).filter(keep);
+  if (append) kept.push(append);
+  try {
+    fs.writeFileSync(tmp, kept.map(formatLine).join(''));
+    fs.renameSync(tmp, ctx.bindingsPath);
+  } catch (err) {
     try {
-      fs.writeFileSync(tmp, kept.map(formatLine).join(''));
-      fs.renameSync(tmp, ctx.bindingsPath);
-    } catch (err) {
-      try {
-        fs.unlinkSync(tmp);
-      } catch {
-        // nothing to clean up
-      }
-      throw err;
+      fs.unlinkSync(tmp);
+    } catch {
+      // nothing to clean up
     }
-  });
+    throw err;
+  }
 }
 
 export function bindingSet(ctx: Ctx, app: App, dir: string, id: string): void {

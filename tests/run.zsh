@@ -403,8 +403,6 @@ out=$(FAKE_CODEX_EMAIL='other@example.com' "$AIENV" show 2>&1)
 has codex-show-mismatch "$out" 'logged-in MISMATCH'
 has codex-show-unknown-not-mismatch "$out" "(${ID_U})  logged-in"
 
-chk no-lock-left-behind "$([[ ! -d $AIENV_HOME/.lock ]] && print 1 || print 0)"
-
 print -r -- ""
 print -r -- "passed: $PASSN  failed: $FAILN"
 if (( FAILN > 0 )); then

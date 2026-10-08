@@ -46,7 +46,6 @@ function makeCtx(pathDirs: string[], extraEnv: Record<string, string> = {}): Ctx
     home,
     storeDir: path.join(home, '.store'),
     bindingsPath: path.join(home, 'bindings'),
-    lockDir: path.join(home, '.lock'),
     userHome: mkdir('user'),
     env: { PATH: [...pathDirs, '/usr/bin', '/bin'].join(':'), ...extraEnv },
     cwd: ROOT,

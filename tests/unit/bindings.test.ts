@@ -9,11 +9,8 @@ import {
   bindingUnset,
   bindingsRemoveId,
   readBindings,
-  releaseLockIfHeld,
   resolveStore,
-  withLock,
 } from '../../src/bindings.ts';
-import { AienvError } from '../../src/types.ts';
 import type { Ctx } from '../../src/types.ts';
 
 function makeCtx(t: { after: (fn: () => void) => void }, createHome = true): Ctx {
@@ -25,7 +22,6 @@ function makeCtx(t: { after: (fn: () => void) => void }, createHome = true): Ctx
     home,
     storeDir: `${home}/.store`,
     bindingsPath: `${home}/bindings`,
-    lockDir: `${home}/.lock`,
     userHome: root,
     env: {},
     cwd: root,
@@ -106,7 +102,7 @@ test('bindingSet replaces only the same app+dir', (t) => {
   assert.equal(raw(ctx), 'codex\t/a\tcx\nclaude\t/a/b\tsub\nclaude\t/a\tnew\n');
 });
 
-test('bindingSet creates home and the file when missing, leaves no temp or lock', (t) => {
+test('bindingSet creates home and the file when missing, leaves no temp file', (t) => {
   const ctx = makeCtx(t, false);
   bindingSet(ctx, 'claude', '*', 'g1');
   assert.equal(raw(ctx), 'claude\t*\tg1\n');
@@ -236,92 +232,4 @@ test('resolveStore: dangling when the store is missing or not a directory', (t) 
     dir: '*',
     dangling: true,
   });
-});
-
-// --- lock ---------------------------------------------------------------------
-
-test('withLock: held during fn, released after success, returns the value', (t) => {
-  const ctx = makeCtx(t, false);
-  const v = withLock(ctx, () => {
-    assert.ok(fs.statSync(ctx.lockDir).isDirectory());
-    assert.equal(fs.readFileSync(`${ctx.lockDir}/pid`, 'utf8').trim(), String(process.pid));
-    return 42;
-  });
-  assert.equal(v, 42);
-  assert.equal(fs.existsSync(ctx.lockDir), false);
-});
-
-test('withLock: released after fn throws', (t) => {
-  const ctx = makeCtx(t);
-  assert.throws(
-    () =>
-      withLock(ctx, () => {
-        throw new Error('boom');
-      }),
-    /boom/,
-  );
-  assert.equal(fs.existsSync(ctx.lockDir), false);
-  assert.equal(withLock(ctx, () => 'again'), 'again');
-});
-
-test('withLock: breaks a stale lock (with or without pid file)', (t) => {
-  const ctx = makeCtx(t);
-  const old = new Date(Date.now() - 11_000);
-  for (const withPid of [true, false]) {
-    fs.mkdirSync(ctx.lockDir);
-    if (withPid) fs.writeFileSync(`${ctx.lockDir}/pid`, '999999\n');
-    fs.utimesSync(ctx.lockDir, old, old);
-    assert.equal(withLock(ctx, () => 'ok'), 'ok');
-    assert.equal(fs.existsSync(ctx.lockDir), false);
-  }
-});
-
-test('withLock: a fresh lock held by someone else -> AienvError, lock untouched', (t) => {
-  const ctx = makeCtx(t);
-  fs.mkdirSync(ctx.lockDir);
-  fs.writeFileSync(`${ctx.lockDir}/pid`, '999999\n');
-  let ran = false;
-  const started = Date.now();
-  assert.throws(
-    () =>
-      withLock(ctx, () => {
-        ran = true;
-      }),
-    (err: unknown) => {
-      assert.ok(err instanceof AienvError);
-      assert.equal(err.message, `another aienv is holding ${ctx.lockDir}; retry shortly`);
-      assert.equal(err.exitCode, 1);
-      return true;
-    },
-  );
-  assert.equal(ran, false);
-  assert.ok(Date.now() - started >= 1900);
-  assert.equal(fs.readFileSync(`${ctx.lockDir}/pid`, 'utf8'), '999999\n');
-  assert.equal(fs.existsSync(ctx.bindingsPath), false);
-});
-
-test('releaseLockIfHeld: releases only a lock owned by this pid', (t) => {
-  const ctx = makeCtx(t);
-  releaseLockIfHeld(ctx); // no lock: no-op
-
-  fs.mkdirSync(ctx.lockDir);
-  releaseLockIfHeld(ctx); // no pid marker: not ours
-  assert.equal(fs.existsSync(ctx.lockDir), true);
-
-  fs.writeFileSync(`${ctx.lockDir}/pid`, `${process.pid + 1}\n`);
-  releaseLockIfHeld(ctx);
-  assert.equal(fs.existsSync(ctx.lockDir), true);
-
-  fs.writeFileSync(`${ctx.lockDir}/pid`, `${process.pid}\n`);
-  releaseLockIfHeld(ctx);
-  assert.equal(fs.existsSync(ctx.lockDir), false);
-});
-
-test('releaseLockIfHeld: usable from inside the critical section (signal path)', (t) => {
-  const ctx = makeCtx(t);
-  withLock(ctx, () => {
-    releaseLockIfHeld(ctx);
-    assert.equal(fs.existsSync(ctx.lockDir), false);
-  });
-  assert.equal(fs.existsSync(ctx.lockDir), false);
 });

@@ -15,8 +15,6 @@ export type Ctx = {
   storeDir: string;
   /** $AIENV_HOME/bindings */
   bindingsPath: string;
-  /** $AIENV_HOME/.lock */
-  lockDir: string;
   /** The user's $HOME. */
   userHome: string;
   /** Snapshot of process.env. */

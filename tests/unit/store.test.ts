@@ -30,7 +30,6 @@ function mkCtx(t: { after: (fn: () => void) => void }): { ctx: Ctx; tmp: string 
     home,
     storeDir: path.join(home, '.store'),
     bindingsPath: path.join(home, 'bindings'),
-    lockDir: path.join(home, '.lock'),
     userHome,
     env: {},
     cwd: tmp,
