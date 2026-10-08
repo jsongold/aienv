@@ -185,6 +185,58 @@ export function captureApp(
   return res.stdout;
 }
 
+/** captureApp without blocking, so several agents can be asked at once. */
+export function captureAppAsync(
+  ctx: Ctx,
+  app: App,
+  store: string | null,
+  args: string[],
+  timeoutMs = 30_000,
+): Promise<string | null> {
+  return new Promise<string | null>((resolve) => {
+    const bin = findRealBin(ctx, app);
+    if (bin === null) {
+      resolve(null);
+      return;
+    }
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(bin, args, {
+        env: childEnv(ctx, app, store),
+        cwd: ctx.cwd,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      resolve(null);
+      return;
+    }
+    const maxBuffer = 16 * 1024 * 1024;
+    let done = false;
+    let out = '';
+    const finish = (result: string | null): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (result === null) {
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          // already gone
+        }
+      }
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    child.on('error', () => finish(null));
+    child.on('close', (code) => finish(code === 0 ? out : null));
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+      out += chunk;
+      if (out.length > maxBuffer) finish(null);
+    });
+  });
+}
+
 const CODEX_REQUESTS =
   '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"aienv","title":"aienv","version":"0"}}}\n' +
   '{"method":"initialized"}\n' +
@@ -286,8 +338,8 @@ export function codexEmail(ctx: Ctx, store: string | null, timeoutMs = 10_000): 
 type ClaudeStatus = { loggedIn: unknown; email: string; orgName: string };
 
 /** null = no output or unparsable. */
-function claudeStatus(ctx: Ctx, store: string | null): ClaudeStatus | null {
-  const out = captureApp(ctx, 'claude', store, ['auth', 'status', '--json']);
+async function claudeStatus(ctx: Ctx, store: string | null): Promise<ClaudeStatus | null> {
+  const out = await captureAppAsync(ctx, 'claude', store, ['auth', 'status', '--json']);
   if (out === null || out.trim() === '') return null;
   let parsed: unknown;
   try {
@@ -302,8 +354,8 @@ function claudeStatus(ctx: Ctx, store: string | null): ClaudeStatus | null {
   return { loggedIn: obj.loggedIn, email: str(obj.email), orgName: str(obj.orgName) };
 }
 
-function codexLoggedIn(ctx: Ctx, store: string): boolean {
-  return captureApp(ctx, 'codex', store, ['login', 'status']) !== null;
+async function codexLoggedIn(ctx: Ctx, store: string): Promise<boolean> {
+  return (await captureAppAsync(ctx, 'codex', store, ['login', 'status'])) !== null;
 }
 
 /** 'unreadable': claude gave no usable status; the caller warns, then prompts like 'unknown'. */
@@ -311,7 +363,7 @@ export type DetectResult = Identity | 'logged-out' | 'unknown' | 'unreadable';
 
 export async function detectIdentity(ctx: Ctx, app: App, store: string): Promise<DetectResult> {
   if (app === 'claude') {
-    const st = claudeStatus(ctx, store);
+    const st = await claudeStatus(ctx, store);
     if (st === null) return 'unreadable';
     if (st.loggedIn === false) return 'logged-out';
     if (st.loggedIn === true) {
@@ -321,7 +373,7 @@ export async function detectIdentity(ctx: Ctx, app: App, store: string): Promise
     return 'unreadable';
   }
   if (app === 'codex') {
-    if (!codexLoggedIn(ctx, store)) return 'logged-out';
+    if (!(await codexLoggedIn(ctx, store))) return 'logged-out';
     const email = await codexEmail(ctx, store);
     return email === '' ? 'unknown' : { org: '-', email };
   }
@@ -330,7 +382,7 @@ export async function detectIdentity(ctx: Ctx, app: App, store: string): Promise
 
 export async function defaultIdentity(ctx: Ctx, app: App): Promise<Identity | null> {
   if (app === 'claude') {
-    const st = claudeStatus(ctx, null);
+    const st = await claudeStatus(ctx, null);
     if (st === null || st.loggedIn !== true || st.email === '') return null;
     return { org: st.orgName || '-', email: st.email };
   }
@@ -345,7 +397,7 @@ export type Status = { text: string; detectedEmail?: string };
 
 export async function accountStatus(ctx: Ctx, acc: Account): Promise<Status> {
   if (acc.app === 'claude') {
-    const st = claudeStatus(ctx, acc.store);
+    const st = await claudeStatus(ctx, acc.store);
     if (st === null) return { text: '?' };
     if (st.loggedIn === false) return { text: 'logged-out' };
     if (st.loggedIn === true) {
@@ -357,7 +409,7 @@ export async function accountStatus(ctx: Ctx, acc: Account): Promise<Status> {
     return { text: '?' };
   }
   if (acc.app === 'codex') {
-    if (!codexLoggedIn(ctx, acc.store)) return { text: 'logged-out/unknown' };
+    if (!(await codexLoggedIn(ctx, acc.store))) return { text: 'logged-out/unknown' };
     const email = await codexEmail(ctx, acc.store);
     if (email !== '' && acc.email === 'unknown') return { text: 'logged-in', detectedEmail: email };
     if (email !== '' && email !== acc.email) return { text: 'logged-in MISMATCH' };

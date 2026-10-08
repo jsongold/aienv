@@ -7,7 +7,7 @@ import * as path from 'node:path';
 import * as tty from 'node:tty';
 
 import { APPS, AienvError, isApp, usageError } from './types.ts';
-import type { App, Ctx, Identity } from './types.ts';
+import type { Account, App, Ctx, Identity } from './types.ts';
 import {
   accountLabel,
   accountsLoad,
@@ -31,6 +31,7 @@ import {
   logoutArgs,
   runApp,
 } from './agents.ts';
+import type { Status } from './agents.ts';
 
 // --- output ---------------------------------------------------------------------
 
@@ -357,39 +358,63 @@ export async function cmdResolve(ctx: Ctx, args: string[]): Promise<number> {
 
 // --- show -----------------------------------------------------------------------
 
-async function showApp(ctx: Ctx, app: App, dir: string, noStatus: boolean): Promise<void> {
+type AppReport = {
+  app: App;
+  src: string;
+  boundId: string;
+  unbound: boolean;
+  accounts: Account[];
+  def: Identity | null;
+  statuses: Status[] | null;
+};
+
+/** Asks the agents (all accounts and the default login at once); prints nothing. */
+async function collectApp(ctx: Ctx, app: App, dir: string, noStatus: boolean): Promise<AppReport> {
   const res = resolveStore(ctx, app, dir);
   let src = 'none';
   if (res.store !== null) src = res.source === 'dir' ? `dir: ${res.dir}` : 'global';
   else if (res.dangling) src = `${res.dir} -> DANGLING ${res.id}`;
-  out('');
-  out(`${app}  [${src}]`);
   const accounts = accountsLoad(ctx, app);
-  if (accounts.length === 0) {
-    out('  (no accounts)');
-    return;
-  }
   // Nothing bound (or dangling): the agent runs with its own default login.
   // When that login is identifiable, star the stored account it equals.
   const unbound = res.id === '' || res.dangling;
-  let def: Identity | null = null;
-  if (unbound && !noStatus) {
-    def = await defaultIdentity(ctx, app);
-    if (def !== null && def.email === '') def = null;
+  const probeDefault = unbound && !noStatus && accounts.length > 0;
+  const [def, statuses] = await Promise.all([
+    probeDefault ? defaultIdentity(ctx, app) : Promise.resolve(null),
+    noStatus ? Promise.resolve(null) : Promise.all(accounts.map((acc) => accountStatus(ctx, acc))),
+  ]);
+  return {
+    app,
+    src,
+    boundId: res.id,
+    unbound,
+    accounts,
+    def: def !== null && def.email === '' ? null : def,
+    statuses,
+  };
+}
+
+function showApp(ctx: Ctx, r: AppReport): void {
+  out('');
+  out(`${r.app}  [${r.src}]`);
+  if (r.accounts.length === 0) {
+    out('  (no accounts)');
+    return;
   }
+  const rows: { mark: string; label: string; id: string; st: string }[] = [];
   let starred = false;
-  for (const acc of accounts) {
+  r.accounts.forEach((acc, i) => {
     let mark = ' ';
-    if (!unbound) {
-      if (acc.id === res.id) mark = '*';
-    } else if (def !== null && !starred && acc.org === def.org && acc.email === def.email) {
+    if (!r.unbound) {
+      if (acc.id === r.boundId) mark = '*';
+    } else if (r.def !== null && !starred && acc.org === r.def.org && acc.email === r.def.email) {
       mark = '*';
       starred = true;
     }
     let email = acc.email;
     let st = '-';
-    if (!noStatus) {
-      const status = await accountStatus(ctx, acc);
+    if (r.statuses !== null) {
+      const status = r.statuses[i]!;
       st = status.text;
       const found = status.detectedEmail;
       if (found !== undefined && found !== '') {
@@ -400,12 +425,12 @@ async function showApp(ctx: Ctx, app: App, dir: string, noStatus: boolean): Prom
         }
       }
     }
-    if (unbound && mark === '*') st = `${st}  (via default login, unbound)`;
-    out(`  ${mark} ${acc.org}/${email}  (${acc.id})  ${st}`);
-  }
-  if (unbound && !starred) {
-    if (def !== null) out(`  * ${def.org}/${def.email}  (default ${app} login; not managed by aienv)`);
-    else out(`  * (default ${app} login; not managed by aienv)`);
+    rows.push({ mark, label: `${acc.org}/${email}`, id: `(${acc.id})`, st });
+  });
+  const labelW = Math.max(...rows.map((row) => row.label.length));
+  const idW = Math.max(...rows.map((row) => row.id.length));
+  for (const row of rows) {
+    out(`  ${row.mark} ${row.label.padEnd(labelW)}  ${row.id.padEnd(idW)}  ${row.st}`);
   }
 }
 
@@ -438,7 +463,8 @@ export async function cmdShow(ctx: Ctx, args: string[]): Promise<number> {
   }
   const dir = here(ctx);
   out(`dir: ${dir}`);
-  for (const app of APPS) await showApp(ctx, app, dir, noStatus);
+  const reports = await Promise.all(APPS.map((app) => collectApp(ctx, app, dir, noStatus)));
+  for (const r of reports) showApp(ctx, r);
   showWarnings(ctx);
   return 0;
 }

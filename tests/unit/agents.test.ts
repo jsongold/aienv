@@ -8,6 +8,7 @@ import {
   ALL_KEY_VARS,
   accountStatus,
   captureApp,
+  captureAppAsync,
   codexEmail,
   defaultIdentity,
   detectIdentity,
@@ -201,6 +202,21 @@ test('captureApp captures stdout; null on failure or missing binary', () => {
   assert.equal(captureApp(ctx, 'codex', null, []), 'HOME=/user/codex KEY=unset\n');
   assert.equal(captureApp(ctx, 'codex', '/st', ['fail']), null);
   assert.equal(captureApp(makeCtx([]), 'codex', '/st', []), null);
+});
+
+test('captureAppAsync matches captureApp: stdout, env, failure, timeout', async () => {
+  const real = mkdir('real');
+  script(
+    real,
+    'codex',
+    '#!/bin/sh\nif [ "$1" = fail ]; then echo partial; exit 3; fi\nif [ "$1" = hang ]; then sleep 5; fi\necho "noise" >&2\necho "HOME=${CODEX_HOME-unset} KEY=${OPENAI_API_KEY-unset}"\n',
+  );
+  const ctx = makeCtx([real], { OPENAI_API_KEY: 'k', CODEX_HOME: '/user/codex' });
+  assert.equal(await captureAppAsync(ctx, 'codex', '/st', []), 'HOME=/st KEY=unset\n');
+  assert.equal(await captureAppAsync(ctx, 'codex', null, []), 'HOME=/user/codex KEY=unset\n');
+  assert.equal(await captureAppAsync(ctx, 'codex', '/st', ['fail']), null);
+  assert.equal(await captureAppAsync(ctx, 'codex', '/st', ['hang'], 200), null);
+  assert.equal(await captureAppAsync(makeCtx([]), 'codex', '/st', []), null);
 });
 
 test('captureApp with store null unsets CLAUDE_CONFIG_DIR for claude', () => {
