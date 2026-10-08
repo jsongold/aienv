@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 import { AienvError } from './types.ts';
 import type { Ctx } from './types.ts';
-import { cmdAdd, cmdRemove, cmdResolve, cmdShow, cmdSwitch, usage } from './commands.ts';
+import { cmdAdd, cmdRemove, cmdShow, cmdSwitch, usage } from './commands.ts';
 
 function isDir(p: string): boolean {
   return fs.statSync(p, { throwIfNoEntry: false })?.isDirectory() ?? false;
@@ -79,8 +79,6 @@ async function main(ctx: Ctx, argv: string[]): Promise<number> {
     case 'remove':
     case 'rm':
       return cmdRemove(ctx, rest);
-    case 'resolve':
-      return cmdResolve(ctx, rest);
     case 'help':
     case '-h':
     case '--help':

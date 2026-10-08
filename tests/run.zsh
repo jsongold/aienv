@@ -19,6 +19,12 @@ aeq() { if [[ "$2" == "$3" ]]; then ok "$1"; else ng "$1" "want=[$2] got=[$3]"; 
 has() { if [[ "$2" == *"$3"* ]]; then ok "$1"; else ng "$1" "missing [$3] in [$2]"; fi }
 hasnt() { if [[ "$2" != *"$3"* ]]; then ok "$1"; else ng "$1" "unexpected [$3]"; fi }
 stores() { local -a s=( "$AIENV_HOME"/.store/*(N/) ); print -r -- ${#s} }
+# shimcfg <dir> [app]: the store the shim hands the agent in dir ('unset' when unbound)
+shimcfg() {
+  local o; o=$( cd "$1"; ${2:-claude} probe 2>/dev/null )
+  o=${${(f)o}[1]}
+  print -r -- ${o#*=}
+}
 # idof <app> <org> <email>: the store id of that account ('' when absent)
 idof() {
   local d
@@ -187,20 +193,17 @@ aeq add-interrupted-cleaned "$n0" "$(stores)"
 W1="$TMPROOT/plain dir"
 mkdir -p -- "$W1"
 ( cd "$W1"; "$AIENV" switch claude 'a@x.com' >/dev/null ); rc=$?
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 chk match-exact-email-beats-substring "$([[ $rc == 0 && $got == $AIENV_HOME/.store/$ID_AX ]] && print 1 || print 0)" "rc=$rc got=$got"
 ( cd "$W1"; "$AIENV" switch claude "$ID_AAX" >/dev/null )
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 aeq match-by-id "$AIENV_HOME/.store/$ID_AAX" "$got"
 ( cd "$W1"; "$AIENV" switch claude 'Acme Org/a@example.com' >/dev/null )
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 aeq match-exact-org-email "$ST_A" "$got"
 ( cd "$W1"; "$AIENV" switch claude --none >/dev/null )
 
-# --- resolve / shim with no bindings -----------------------------------------
-
-( cd "$W1"; "$AIENV" resolve claude >/dev/null 2>&1 ); rc=$?
-chk resolve-no-binding-exit1 "$(( rc == 1 ))" "rc=$rc"
+# --- shim with no bindings ----------------------------------------------------
 
 out=$( cd "$W1"; ANTHROPIC_API_KEY=sk-unbound claude hello )
 has shim-unbound-passthrough-cfg "$out" 'CFG=unset'
@@ -211,20 +214,20 @@ b=$( cd "$W1"; ANTHROPIC_API_KEY=sk-u "$FAKEBIN/claude" envdump )
 aeq shim-unbound-env-identical "$b" "$a"
 hasnt shim-no-marker-leak "$a" 'AIENV_SHIM_ACTIVE'
 
-# --- switch / resolve ---------------------------------------------------------
+# --- switch -------------------------------------------------------------------
 
 WORK="$TMPROOT/work"
 mkdir -p -- "$WORK/proj a/sub"
 ( cd "$WORK";        "$AIENV" switch claude 'a@example.com' >/dev/null )
 ( cd "$WORK/proj a"; "$AIENV" switch claude 'b@example.com' >/dev/null )
 
-got=$( cd "$WORK/proj a/sub"; "$AIENV" resolve claude )
+got=$(shimcfg "$WORK/proj a/sub")
 aeq resolve-nearest-ancestor "$ST_B" "$got"
-got=$( cd "$WORK"; "$AIENV" resolve claude )
+got=$(shimcfg "$WORK")
 aeq resolve-own-dir "$ST_A" "$got"
 
 ( cd "$WORK"; "$AIENV" switch claude 'b@example.com' >/dev/null )
-got=$( cd "$WORK"; "$AIENV" resolve claude )
+got=$(shimcfg "$WORK")
 n=$(grep -c -F -- "$WORK	" "$AIENV_HOME/bindings" || true)
 chk switch-replaces-line "$([[ $got == $ST_B && $n == 1 ]] && print 1 || print 0)" "got=$got lines=$n"
 ( cd "$WORK"; "$AIENV" switch claude 'a@example.com' >/dev/null )
@@ -238,10 +241,10 @@ chk switch-no-match-fails "$(( rc != 0 ))" "rc=$rc"
 mkdir -p -- "$TMPROOT/sym target"
 ln -s "$TMPROOT/sym target" "$TMPROOT/sym link"
 ( cd "$TMPROOT/sym link"; "$AIENV" switch claude 'b@example.com' >/dev/null )
-got=$( cd "$TMPROOT/sym target"; "$AIENV" resolve claude )
+got=$(shimcfg "$TMPROOT/sym target")
 aeq switch-symlink-dir-stored-physical "$ST_B" "$got"
-got=$( cd "$TMPROOT/sym link"; "$AIENV" resolve claude )
-aeq resolve-through-symlink-dir "$ST_B" "$got"
+got=$(shimcfg "$TMPROOT/sym link")
+aeq shim-through-symlink-dir-store "$ST_B" "$got"
 out=$( cd "$TMPROOT/sym link"; claude go )
 has shim-through-symlink-dir "$out" "CFG=$ST_B"
 
@@ -294,19 +297,19 @@ has shim-no-recursion-trailing-slash "$out" "CFG=$ST_A"
 
 BSAVE=$(< "$AIENV_HOME/bindings")
 printf 'claude\t%s\t%s' "$W1" "$ID_B" > "$AIENV_HOME/bindings"
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 aeq bindings-no-final-newline "$ST_B" "$got"
 
 printf 'claude\t%s\t%s\r\n\n\t\t\nbogusline\n' "$W1" "$ID_B" > "$AIENV_HOME/bindings"
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 aeq bindings-crlf-and-junk "$ST_B" "$got"
 
 printf 'claude\t%s\t%s\nclaude\t%s\t%s\n' "$W1" "$ID_A" "$W1" "$ID_B" > "$AIENV_HOME/bindings"
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 aeq bindings-duplicate-first-wins "$ST_A" "$got"
 
 printf 'claude\t/\t%s\n' "$ID_A" > "$AIENV_HOME/bindings"
-got=$( cd "$WORK/proj a/sub"; "$AIENV" resolve claude )
+got=$(shimcfg "$WORK/proj a/sub")
 aeq bindings-root-matches-everything "$ST_A" "$got"
 
 printf 'claude\t%s\tdeadbeef00\n' "$W1" > "$AIENV_HOME/bindings"
@@ -318,16 +321,16 @@ has show-marks-dangling "$out" 'DANGLING deadbeef00'
 
 printf 'claude\t%s\t%s\ncodex\t%s\t%s' "$WORK" "$ID_A" "$WORK" "$ID_C" > "$AIENV_HOME/bindings"
 ( cd "$W1"; "$AIENV" switch claude 'b@example.com' >/dev/null )
-got=$( cd "$WORK"; "$AIENV" resolve codex )
+got=$(shimcfg "$WORK" codex)
 aeq bindings-rewrite-keeps-unterminated-line "$ST_C" "$got"
 print -r -- "$BSAVE" > "$AIENV_HOME/bindings"
 
 # --- global fallback ----------------------------------------------------------
 
 ( cd "$W1"; "$AIENV" switch claude 'b@example.com' --global >/dev/null )
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 aeq resolve-global-fallback "$ST_B" "$got"
-got=$( cd "$WORK"; "$AIENV" resolve claude )
+got=$(shimcfg "$WORK")
 aeq resolve-dir-beats-global "$ST_A" "$got"
 out=$( cd "$W1"; claude hello )
 has shim-global-fallback "$out" "CFG=$ST_B"
@@ -339,8 +342,8 @@ AIENV_HOME="$ALT" zsh "$ROOT/install.sh" >/dev/null
 AIENV_HOME="$ALT" FAKE_ORG='Alt Org' FAKE_EMAIL='z@example.com' "$ALT/bin/aienv" add claude >/dev/null 2>&1
 ID_Z=$(AIENV_HOME="$ALT" idof claude 'Alt Org' z@example.com)
 ( cd "$W1"; AIENV_HOME="$ALT" "$ALT/bin/aienv" switch claude 'z@example.com' >/dev/null )
-got=$( cd "$W1"; unset AIENV_HOME; "$ALT/bin/aienv" resolve claude )
-aeq althome-aienv-derives-home "$ALT/.store/$ID_Z" "$got"
+out=$( cd "$W1"; unset AIENV_HOME; "$ALT/bin/aienv" help )
+has althome-aienv-derives-home "$out" "home: $ALT"
 out=$( cd "$W1"; unset AIENV_HOME; export PATH="$ALT/bin:$FAKEBIN:/usr/bin:/bin"; claude go )
 has althome-shim-derives-home "$out" "CFG=$ALT/.store/$ID_Z"
 

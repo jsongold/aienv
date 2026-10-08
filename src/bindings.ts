@@ -119,7 +119,7 @@ export function resolveStore(ctx: Ctx, app: App, dir: string): Resolution {
     return { store: null, id: '', source: 'none', dir: '', dangling: false };
   }
 
-  const store = `${ctx.storeDir}/${best}`; // no normalisation: printed verbatim by `resolve`
+  const store = `${ctx.storeDir}/${best}`;
   let isDir = false;
   try {
     isDir = fs.statSync(store).isDirectory();

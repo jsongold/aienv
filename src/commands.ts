@@ -58,7 +58,6 @@ export function usage(ctx: Ctx): string {
     '  switch <app> --none             drop the binding for this directory',
     '  show [--no-status]              accounts, bindings and warnings',
     '  remove <app> <match>            log out and delete an account store',
-    '  resolve <app> [dir]             print the store bound for dir (plumbing)',
     '  help',
     '',
     'match: an id, an exact org/email, an exact email, or a unique substring.',
@@ -317,24 +316,6 @@ export async function cmdRemove(ctx: Ctx, args: string[]): Promise<number> {
   bindingsRemoveId(ctx, acc.id);
   out(`removed ${app} ${label}`);
   return 0;
-}
-
-// --- resolve --------------------------------------------------------------------
-
-export async function cmdResolve(ctx: Ctx, args: string[]): Promise<number> {
-  const appArg = args[0] ?? '';
-  if (appArg === '') throw usageError('usage: aienv resolve <app> [dir]');
-  const app = requireApp(appArg);
-  const dir = resolveA(ctx, args[1] ?? ctx.cwd);
-  const res = resolveStore(ctx, app, dir);
-  if (res.store !== null) {
-    out(res.store);
-    return 0;
-  }
-  if (res.dangling) {
-    err(`aienv: binding for ${res.dir} points at missing account ${res.id}; run: aienv switch ${app}`);
-  }
-  return 1;
 }
 
 // --- show -----------------------------------------------------------------------
