@@ -18,7 +18,23 @@ chk() { if (( $2 )); then ok "$1"; else ng "$1" "${3-}"; fi }
 aeq() { if [[ "$2" == "$3" ]]; then ok "$1"; else ng "$1" "want=[$2] got=[$3]"; fi }
 has() { if [[ "$2" == *"$3"* ]]; then ok "$1"; else ng "$1" "missing [$3] in [$2]"; fi }
 hasnt() { if [[ "$2" != *"$3"* ]]; then ok "$1"; else ng "$1" "unexpected [$3]"; fi }
+rx() { if [[ "$2" =~ $3 ]]; then ok "$1"; else ng "$1" "no match for /$3/ in [$2]"; fi }
 stores() { local -a s=( "$AIENV_HOME"/.store/*(N/) ); print -r -- ${#s} }
+# shimcfg <dir> [app]: the store the shim hands the agent in dir ('unset' when unbound)
+shimcfg() {
+  local o; o=$( cd "$1"; ${2:-claude} probe 2>/dev/null )
+  o=${${(f)o}[1]}
+  print -r -- ${o#*=}
+}
+# idof <app> <org> <email>: the store id of that account ('' when absent)
+idof() {
+  local d
+  for d in "$AIENV_HOME"/.store/*(N/); do
+    [[ -f $d/.aienv-meta && $(< "$d/.aienv-meta") == "app=$1"$'\n'"org=$2"$'\n'"email=$3" ]] || continue
+    print -r -- ${d:t}; return 0
+  done
+  return 1
+}
 
 TMPROOT=$(mktemp -d /tmp/aienv-tests.XXXXXX)
 TMPROOT=${TMPROOT:A}
@@ -133,18 +149,13 @@ FAKE_ORG='Acme Org' FAKE_EMAIL='aa@x.com'      "$AIENV" add claude >/dev/null 2>
 print -r -- 'c@example.com'  | "$AIENV" add codex    >/dev/null 2>&1
 print -r -- 'oc@example.com' | "$AIENV" add opencode >/dev/null 2>&1
 
-LNK_A="$AIENV_HOME/claude/Acme Org/a@example.com"
-LNK_B="$AIENV_HOME/claude/Acme Org/b@example.com"
-LNK_C="$AIENV_HOME/codex/-/c@example.com"
-LNK_O="$AIENV_HOME/opencode/-/oc@example.com"
-chk add-display-symlinks "$([[ -L $LNK_A && -L $LNK_B && -L $LNK_C && -L $LNK_O ]] && print 1 || print 0)"
-
-ID_A=$(readlink -- "$LNK_A"); ID_A=${ID_A:t}
-ID_B=$(readlink -- "$LNK_B"); ID_B=${ID_B:t}
-ID_C=$(readlink -- "$LNK_C"); ID_C=${ID_C:t}
-ID_O=$(readlink -- "$LNK_O"); ID_O=${ID_O:t}
-ID_AX=$(readlink -- "$AIENV_HOME/claude/Acme Org/a@x.com");   ID_AX=${ID_AX:t}
-ID_AAX=$(readlink -- "$AIENV_HOME/claude/Acme Org/aa@x.com"); ID_AAX=${ID_AAX:t}
+ID_A=$(idof claude 'Acme Org' a@example.com)
+ID_B=$(idof claude 'Acme Org' b@example.com)
+ID_C=$(idof codex - c@example.com)
+ID_O=$(idof opencode - oc@example.com)
+ID_AX=$(idof claude 'Acme Org' a@x.com)
+ID_AAX=$(idof claude 'Acme Org' aa@x.com)
+chk add-stores-created "$([[ -n $ID_A && -n $ID_B && -n $ID_C && -n $ID_O && -n $ID_AX && -n $ID_AAX ]] && print 1 || print 0)"
 ST_A="$AIENV_HOME/.store/$ID_A"
 ST_B="$AIENV_HOME/.store/$ID_B"
 ST_C="$AIENV_HOME/.store/$ID_C"
@@ -178,38 +189,22 @@ kill -INT $apid 2>/dev/null || true
 wait $apid 2>/dev/null || true
 aeq add-interrupted-cleaned "$n0" "$(stores)"
 
-# hostile org/email must stay under $AIENV_HOME/<app>/ and not clobber bindings
-( cd "$TMPROOT"; "$AIENV" switch claude "$ID_A" --global >/dev/null )
-BSAVE0=$(< "$AIENV_HOME/bindings")
-FAKE_ORG='..' FAKE_EMAIL='bindings' "$AIENV" add claude >/dev/null 2>&1
-chk hostile-bindings-file-intact "$([[ -f $AIENV_HOME/bindings && ! -L $AIENV_HOME/bindings ]] && print 1 || print 0)"
-aeq hostile-bindings-content "$BSAVE0" "$(< "$AIENV_HOME/bindings")"
-chk hostile-dotdot-org-contained "$([[ -L $AIENV_HOME/claude/_/bindings ]] && print 1 || print 0)"
-FAKE_ORG='-rf' FAKE_EMAIL='x@evil.test' "$AIENV" add claude >/dev/null 2>&1
-chk hostile-leading-dash-escaped "$([[ -L $AIENV_HOME/claude/_-rf/x@evil.test ]] && print 1 || print 0)"
-print -r -- 'y' | "$AIENV" remove claude 'bindings'    >/dev/null 2>&1
-print -r -- 'y' | "$AIENV" remove claude 'x@evil.test' >/dev/null 2>&1
-( cd "$TMPROOT"; "$AIENV" switch claude --none --global >/dev/null )
-
 # --- match precedence ---------------------------------------------------------
 
 W1="$TMPROOT/plain dir"
 mkdir -p -- "$W1"
 ( cd "$W1"; "$AIENV" switch claude 'a@x.com' >/dev/null ); rc=$?
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 chk match-exact-email-beats-substring "$([[ $rc == 0 && $got == $AIENV_HOME/.store/$ID_AX ]] && print 1 || print 0)" "rc=$rc got=$got"
 ( cd "$W1"; "$AIENV" switch claude "$ID_AAX" >/dev/null )
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 aeq match-by-id "$AIENV_HOME/.store/$ID_AAX" "$got"
 ( cd "$W1"; "$AIENV" switch claude 'Acme Org/a@example.com' >/dev/null )
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 aeq match-exact-org-email "$ST_A" "$got"
 ( cd "$W1"; "$AIENV" switch claude --none >/dev/null )
 
-# --- resolve / shim with no bindings -----------------------------------------
-
-( cd "$W1"; "$AIENV" resolve claude >/dev/null 2>&1 ); rc=$?
-chk resolve-no-binding-exit1 "$(( rc == 1 ))" "rc=$rc"
+# --- shim with no bindings ----------------------------------------------------
 
 out=$( cd "$W1"; ANTHROPIC_API_KEY=sk-unbound claude hello )
 has shim-unbound-passthrough-cfg "$out" 'CFG=unset'
@@ -220,20 +215,20 @@ b=$( cd "$W1"; ANTHROPIC_API_KEY=sk-u "$FAKEBIN/claude" envdump )
 aeq shim-unbound-env-identical "$b" "$a"
 hasnt shim-no-marker-leak "$a" 'AIENV_SHIM_ACTIVE'
 
-# --- switch / resolve ---------------------------------------------------------
+# --- switch -------------------------------------------------------------------
 
 WORK="$TMPROOT/work"
 mkdir -p -- "$WORK/proj a/sub"
 ( cd "$WORK";        "$AIENV" switch claude 'a@example.com' >/dev/null )
 ( cd "$WORK/proj a"; "$AIENV" switch claude 'b@example.com' >/dev/null )
 
-got=$( cd "$WORK/proj a/sub"; "$AIENV" resolve claude )
+got=$(shimcfg "$WORK/proj a/sub")
 aeq resolve-nearest-ancestor "$ST_B" "$got"
-got=$( cd "$WORK"; "$AIENV" resolve claude )
+got=$(shimcfg "$WORK")
 aeq resolve-own-dir "$ST_A" "$got"
 
 ( cd "$WORK"; "$AIENV" switch claude 'b@example.com' >/dev/null )
-got=$( cd "$WORK"; "$AIENV" resolve claude )
+got=$(shimcfg "$WORK")
 n=$(grep -c -F -- "$WORK	" "$AIENV_HOME/bindings" || true)
 chk switch-replaces-line "$([[ $got == $ST_B && $n == 1 ]] && print 1 || print 0)" "got=$got lines=$n"
 ( cd "$WORK"; "$AIENV" switch claude 'a@example.com' >/dev/null )
@@ -247,10 +242,10 @@ chk switch-no-match-fails "$(( rc != 0 ))" "rc=$rc"
 mkdir -p -- "$TMPROOT/sym target"
 ln -s "$TMPROOT/sym target" "$TMPROOT/sym link"
 ( cd "$TMPROOT/sym link"; "$AIENV" switch claude 'b@example.com' >/dev/null )
-got=$( cd "$TMPROOT/sym target"; "$AIENV" resolve claude )
+got=$(shimcfg "$TMPROOT/sym target")
 aeq switch-symlink-dir-stored-physical "$ST_B" "$got"
-got=$( cd "$TMPROOT/sym link"; "$AIENV" resolve claude )
-aeq resolve-through-symlink-dir "$ST_B" "$got"
+got=$(shimcfg "$TMPROOT/sym link")
+aeq shim-through-symlink-dir-store "$ST_B" "$got"
 out=$( cd "$TMPROOT/sym link"; claude go )
 has shim-through-symlink-dir "$out" "CFG=$ST_B"
 
@@ -303,19 +298,19 @@ has shim-no-recursion-trailing-slash "$out" "CFG=$ST_A"
 
 BSAVE=$(< "$AIENV_HOME/bindings")
 printf 'claude\t%s\t%s' "$W1" "$ID_B" > "$AIENV_HOME/bindings"
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 aeq bindings-no-final-newline "$ST_B" "$got"
 
 printf 'claude\t%s\t%s\r\n\n\t\t\nbogusline\n' "$W1" "$ID_B" > "$AIENV_HOME/bindings"
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 aeq bindings-crlf-and-junk "$ST_B" "$got"
 
 printf 'claude\t%s\t%s\nclaude\t%s\t%s\n' "$W1" "$ID_A" "$W1" "$ID_B" > "$AIENV_HOME/bindings"
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 aeq bindings-duplicate-first-wins "$ST_A" "$got"
 
 printf 'claude\t/\t%s\n' "$ID_A" > "$AIENV_HOME/bindings"
-got=$( cd "$WORK/proj a/sub"; "$AIENV" resolve claude )
+got=$(shimcfg "$WORK/proj a/sub")
 aeq bindings-root-matches-everything "$ST_A" "$got"
 
 printf 'claude\t%s\tdeadbeef00\n' "$W1" > "$AIENV_HOME/bindings"
@@ -327,16 +322,16 @@ has show-marks-dangling "$out" 'DANGLING deadbeef00'
 
 printf 'claude\t%s\t%s\ncodex\t%s\t%s' "$WORK" "$ID_A" "$WORK" "$ID_C" > "$AIENV_HOME/bindings"
 ( cd "$W1"; "$AIENV" switch claude 'b@example.com' >/dev/null )
-got=$( cd "$WORK"; "$AIENV" resolve codex )
+got=$(shimcfg "$WORK" codex)
 aeq bindings-rewrite-keeps-unterminated-line "$ST_C" "$got"
 print -r -- "$BSAVE" > "$AIENV_HOME/bindings"
 
 # --- global fallback ----------------------------------------------------------
 
 ( cd "$W1"; "$AIENV" switch claude 'b@example.com' --global >/dev/null )
-got=$( cd "$W1"; "$AIENV" resolve claude )
+got=$(shimcfg "$W1")
 aeq resolve-global-fallback "$ST_B" "$got"
-got=$( cd "$WORK"; "$AIENV" resolve claude )
+got=$(shimcfg "$WORK")
 aeq resolve-dir-beats-global "$ST_A" "$got"
 out=$( cd "$W1"; claude hello )
 has shim-global-fallback "$out" "CFG=$ST_B"
@@ -346,19 +341,26 @@ has shim-global-fallback "$out" "CFG=$ST_B"
 ALT="$TMPROOT/alt home"
 AIENV_HOME="$ALT" zsh "$ROOT/install.sh" >/dev/null
 AIENV_HOME="$ALT" FAKE_ORG='Alt Org' FAKE_EMAIL='z@example.com' "$ALT/bin/aienv" add claude >/dev/null 2>&1
-ID_Z=$(readlink -- "$ALT/claude/Alt Org/z@example.com"); ID_Z=${ID_Z:t}
+ID_Z=$(AIENV_HOME="$ALT" idof claude 'Alt Org' z@example.com)
 ( cd "$W1"; AIENV_HOME="$ALT" "$ALT/bin/aienv" switch claude 'z@example.com' >/dev/null )
-got=$( cd "$W1"; unset AIENV_HOME; "$ALT/bin/aienv" resolve claude )
-aeq althome-aienv-derives-home "$ALT/.store/$ID_Z" "$got"
+out=$( cd "$W1"; unset AIENV_HOME; "$ALT/bin/aienv" help )
+has althome-aienv-derives-home "$out" "home: $ALT"
 out=$( cd "$W1"; unset AIENV_HOME; export PATH="$ALT/bin:$FAKEBIN:/usr/bin:/bin"; claude go )
 has althome-shim-derives-home "$out" "CFG=$ALT/.store/$ID_Z"
 
 # --- show ---------------------------------------------------------------------
 
+FAKE_ORG="p@example.com's Organization" FAKE_EMAIL='p@example.com' "$AIENV" add claude >/dev/null 2>&1
+ID_P=$(idof claude "p@example.com's Organization" p@example.com)
 out=$( cd "$WORK"; "$AIENV" show --no-status 2>&1 ); rc=$?
 chk show-runs "$(( rc == 0 ))" "rc=$rc"
-has show-marks-active "$out" "* Acme Org/a@example.com"
-has show-prints-id "$out" "($ID_A)"
+has show-marks-active "$out" "* Acme Org"
+rx show-prints-email-and-id "$out" "Acme Org +a@example.com +\\($ID_A\\)"
+hasnt show-no-status-prints-nothing "$out" "($ID_A) "
+hasnt show-hides-email-in-label "$out" "Acme Org/a@example.com"
+rx show-personal-org-shows-domain "$out" "example.com +p@example.com +\\($ID_P\\)"
+hasnt show-hides-personal-org "$out" "'s Organization"
+rx show-no-org-shows-domain "$out" "example.com +c@example.com +\\($ID_C\\)"
 has show-binding-source "$out" "dir: $WORK"
 out=$( cd "$WORK"; ANTHROPIC_API_KEY=sk-secret-value CLAUDE_CODE_OAUTH_TOKEN=oauth-secret "$AIENV" show --no-status 2>&1 )
 has show-warns-api-key "$out" 'ANTHROPIC_API_KEY is set'
@@ -369,8 +371,6 @@ hasnt show-hides-api-key-value "$out" 'sk-secret-value'
 
 print -r -- 'y' | "$AIENV" remove codex 'c@example.com' >/dev/null 2>&1
 chk remove-store-gone "$([[ ! -e $ST_C ]] && print 1 || print 0)"
-chk remove-symlink-gone "$([[ ! -L $LNK_C ]] && print 1 || print 0)"
-chk remove-empty-org-dir-gone "$([[ ! -d $AIENV_HOME/codex ]] && print 1 || print 0)"
 n=$(grep -c -F -- "$ID_C" "$AIENV_HOME/bindings" || true)
 aeq remove-bindings-gone 0 "$n"
 
@@ -380,7 +380,7 @@ chk remove-declined-keeps-store "$([[ -d $ST_A ]] && print 1 || print 0)"
 print -r -- 'y' | "$AIENV" remove claude 'a@example.com' >/dev/null 2>&1
 n=$(grep -c -F -- "$ID_A" "$AIENV_HOME/bindings" || true)
 chk remove-all-bindings-for-id "$([[ ! -d $ST_A && $n == 0 ]] && print 1 || print 0)" "lines=$n"
-chk remove-keeps-shared-org-dir "$([[ -L $LNK_B ]] && print 1 || print 0)"
+chk remove-keeps-other-store "$([[ -d $ST_B ]] && print 1 || print 0)"
 
 # --- misc ---------------------------------------------------------------------
 
@@ -389,16 +389,14 @@ chk unknown-command-exit2 "$(( rc == 2 ))" "rc=$rc"
 # --- codex identity via app-server ---------------------------------------------
 
 FAKE_CODEX_EMAIL='auto@example.com' "$AIENV" add codex </dev/null >/dev/null 2>&1
-chk codex-add-detects-email "$([[ -L $AIENV_HOME/codex/-/auto@example.com ]] && print 1 || print 0)"
+chk codex-add-detects-email "$([[ -n $(idof codex - auto@example.com) ]] && print 1 || print 0)"
 print -r -- '' | "$AIENV" add codex >/dev/null 2>&1
-chk codex-add-blank-is-unknown "$([[ -L $AIENV_HOME/codex/-/unknown ]] && print 1 || print 0)"
-out=$(FAKE_CODEX_EMAIL='late@example.com' "$AIENV" show 2>&1)
-has codex-show-heals-unknown "$out" '-/late@example.com'
-chk codex-heal-moves-link "$([[ -L $AIENV_HOME/codex/-/late@example.com && ! -L $AIENV_HOME/codex/-/unknown ]] && print 1 || print 0)"
+ID_U=$(idof codex - unknown)
+chk codex-add-blank-is-unknown "$([[ -n $ID_U ]] && print 1 || print 0)"
 out=$(FAKE_CODEX_EMAIL='other@example.com' "$AIENV" show 2>&1)
 has codex-show-mismatch "$out" 'logged-in MISMATCH'
-
-chk no-lock-left-behind "$([[ ! -d $AIENV_HOME/.lock ]] && print 1 || print 0)"
+has codex-show-unknown-row "$out" "(${ID_U})"
+hasnt codex-show-hides-logged-in "$out" "(${ID_U}) "
 
 print -r -- ""
 print -r -- "passed: $PASSN  failed: $FAILN"

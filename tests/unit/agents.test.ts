@@ -5,18 +5,15 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 
 import {
+  AGENTS,
   ALL_KEY_VARS,
   accountStatus,
-  captureApp,
+  captureAppAsync,
   codexEmail,
   defaultIdentity,
   detectIdentity,
-  envVarFor,
   findRealBin,
   firstInPath,
-  keyVarsFor,
-  loginArgs,
-  logoutArgs,
   runApp,
 } from '../../src/agents.ts';
 import type { Account, App, Ctx } from '../../src/types.ts';
@@ -46,7 +43,6 @@ function makeCtx(pathDirs: string[], extraEnv: Record<string, string> = {}): Ctx
     home,
     storeDir: path.join(home, '.store'),
     bindingsPath: path.join(home, 'bindings'),
-    lockDir: path.join(home, '.lock'),
     userHome: mkdir('user'),
     env: { PATH: [...pathDirs, '/usr/bin', '/bin'].join(':'), ...extraEnv },
     cwd: ROOT,
@@ -78,16 +74,26 @@ exit 0
 `;
 
 test('static tables', () => {
-  assert.equal(envVarFor('claude'), 'CLAUDE_CONFIG_DIR');
-  assert.equal(envVarFor('codex'), 'CODEX_HOME');
-  assert.equal(envVarFor('opencode'), 'XDG_DATA_HOME');
-  assert.deepEqual(keyVarsFor('claude'), [
-    'ANTHROPIC_API_KEY',
-    'ANTHROPIC_AUTH_TOKEN',
-    'CLAUDE_CODE_OAUTH_TOKEN',
-  ]);
-  assert.deepEqual(keyVarsFor('codex'), ['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN']);
-  assert.deepEqual(keyVarsFor('opencode'), ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY']);
+  assert.deepEqual(AGENTS, {
+    claude: {
+      envVar: 'CLAUDE_CONFIG_DIR',
+      keyVars: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'],
+      login: ['auth', 'login'],
+      logout: ['auth', 'logout'],
+    },
+    codex: {
+      envVar: 'CODEX_HOME',
+      keyVars: ['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN'],
+      login: ['login'],
+      logout: ['logout'],
+    },
+    opencode: {
+      envVar: 'XDG_DATA_HOME',
+      keyVars: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'],
+      login: ['auth', 'login'],
+      logout: ['auth', 'logout'],
+    },
+  });
   assert.deepEqual(ALL_KEY_VARS, [
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_AUTH_TOKEN',
@@ -95,12 +101,6 @@ test('static tables', () => {
     'OPENAI_API_KEY',
     'CODEX_ACCESS_TOKEN',
   ]);
-  assert.deepEqual(loginArgs('claude'), ['auth', 'login']);
-  assert.deepEqual(loginArgs('codex'), ['login']);
-  assert.deepEqual(loginArgs('opencode'), ['auth', 'login']);
-  assert.deepEqual(logoutArgs('claude'), ['auth', 'logout']);
-  assert.deepEqual(logoutArgs('codex'), ['logout']);
-  assert.deepEqual(logoutArgs('opencode'), ['auth', 'logout']);
 });
 
 test('findRealBin skips the shim dir, even through a symlink', () => {
@@ -188,26 +188,26 @@ test('runApp returns 127 without a real binary and 128+n on a signal', () => {
   assert.equal(runApp(makeCtx([real]), 'codex', '/s', []), 128 + 15);
 });
 
-test('captureApp captures stdout; null on failure or missing binary', () => {
+test('captureAppAsync: stdout, env, failure, timeout', async () => {
   const real = mkdir('real');
   script(
     real,
     'codex',
-    '#!/bin/sh\nif [ "$1" = fail ]; then echo partial; exit 3; fi\necho "noise" >&2\necho "HOME=${CODEX_HOME-unset} KEY=${OPENAI_API_KEY-unset}"\n',
+    '#!/bin/sh\nif [ "$1" = fail ]; then echo partial; exit 3; fi\nif [ "$1" = hang ]; then sleep 5; fi\necho "noise" >&2\necho "HOME=${CODEX_HOME-unset} KEY=${OPENAI_API_KEY-unset}"\n',
   );
   const ctx = makeCtx([real], { OPENAI_API_KEY: 'k', CODEX_HOME: '/user/codex' });
-  assert.equal(captureApp(ctx, 'codex', '/st', []), 'HOME=/st KEY=unset\n');
-  // store null: codex keeps the user's CODEX_HOME.
-  assert.equal(captureApp(ctx, 'codex', null, []), 'HOME=/user/codex KEY=unset\n');
-  assert.equal(captureApp(ctx, 'codex', '/st', ['fail']), null);
-  assert.equal(captureApp(makeCtx([]), 'codex', '/st', []), null);
+  assert.equal(await captureAppAsync(ctx, 'codex', '/st', []), 'HOME=/st KEY=unset\n');
+  assert.equal(await captureAppAsync(ctx, 'codex', null, []), 'HOME=/user/codex KEY=unset\n');
+  assert.equal(await captureAppAsync(ctx, 'codex', '/st', ['fail']), null);
+  assert.equal(await captureAppAsync(ctx, 'codex', '/st', ['hang'], 200), null);
+  assert.equal(await captureAppAsync(makeCtx([]), 'codex', '/st', []), null);
 });
 
-test('captureApp with store null unsets CLAUDE_CONFIG_DIR for claude', () => {
+test('captureAppAsync with store null unsets CLAUDE_CONFIG_DIR for claude', async () => {
   const real = mkdir('real');
   script(real, 'claude', '#!/bin/sh\necho "CFG=${CLAUDE_CONFIG_DIR-unset}"\n');
   const ctx = makeCtx([real], { CLAUDE_CONFIG_DIR: '/bound/store' });
-  assert.equal(captureApp(ctx, 'claude', null, []), 'CFG=unset\n');
+  assert.equal(await captureAppAsync(ctx, 'claude', null, []), 'CFG=unset\n');
 });
 
 test('claude detectIdentity: logged in / logged out / no email / garbage', async () => {
@@ -321,40 +321,31 @@ test('defaultIdentity', async () => {
 });
 
 test('accountStatus: claude matrix', async () => {
-  const status = async (json: string | null, org: string, email: string): Promise<unknown> => {
+  const status = async (json: string | null, org: string, email: string): Promise<string> => {
     const real = mkdir('real');
     script(real, 'claude', json === null ? '#!/bin/sh\nexit 0\n' : CLAUDE_STATUS(json));
     return accountStatus(makeCtx([real]), account('claude', org, email));
   };
   const ok = '{"loggedIn":true,"email":"a@b.c","orgName":"Acme"}';
-  assert.deepEqual(await status(ok, 'Acme', 'a@b.c'), { text: 'logged-in' });
-  assert.deepEqual(await status(ok, 'Acme', 'other@b.c'), { text: 'logged-in MISMATCH' });
-  assert.deepEqual(await status(ok, 'Other', 'a@b.c'), { text: 'logged-in MISMATCH' });
+  assert.equal(await status(ok, 'Acme', 'a@b.c'), 'logged-in');
+  assert.equal(await status(ok, 'Acme', 'other@b.c'), 'logged-in MISMATCH');
+  assert.equal(await status(ok, 'Other', 'a@b.c'), 'logged-in MISMATCH');
   // Empty reported fields never mismatch.
-  assert.deepEqual(await status('{"loggedIn":true}', 'Acme', 'a@b.c'), { text: 'logged-in' });
-  assert.deepEqual(await status('{"loggedIn":false}', 'Acme', 'a@b.c'), { text: 'logged-out' });
-  assert.deepEqual(await status('{"x":1}', 'Acme', 'a@b.c'), { text: '?' });
-  assert.deepEqual(await status('garbage', 'Acme', 'a@b.c'), { text: '?' });
-  assert.deepEqual(await status(null, 'Acme', 'a@b.c'), { text: '?' });
-  assert.deepEqual(await accountStatus(makeCtx([]), account('claude', 'Acme', 'a@b.c')), {
-    text: '?',
-  });
+  assert.equal(await status('{"loggedIn":true}', 'Acme', 'a@b.c'), 'logged-in');
+  assert.equal(await status('{"loggedIn":false}', 'Acme', 'a@b.c'), 'logged-out');
+  assert.equal(await status('{"x":1}', 'Acme', 'a@b.c'), '?');
+  assert.equal(await status('garbage', 'Acme', 'a@b.c'), '?');
+  assert.equal(await status(null, 'Acme', 'a@b.c'), '?');
+  assert.equal(await accountStatus(makeCtx([]), account('claude', 'Acme', 'a@b.c')), '?');
 });
 
 test('accountStatus: codex matrix and opencode', async () => {
   const real = mkdir('real');
   script(real, 'codex', CODEX_OK);
   const ctx = makeCtx([real], { FAKE_CODEX_EMAIL: 'me@example.com' });
-  assert.deepEqual(await accountStatus(ctx, account('codex', '-', 'me@example.com')), {
-    text: 'logged-in',
-  });
-  assert.deepEqual(await accountStatus(ctx, account('codex', '-', 'other@example.com')), {
-    text: 'logged-in MISMATCH',
-  });
-  assert.deepEqual(await accountStatus(ctx, account('codex', '-', 'unknown')), {
-    text: 'logged-in',
-    detectedEmail: 'me@example.com',
-  });
+  assert.equal(await accountStatus(ctx, account('codex', '-', 'me@example.com')), 'logged-in');
+  assert.equal(await accountStatus(ctx, account('codex', '-', 'other@example.com')), 'logged-in MISMATCH');
+  assert.equal(await accountStatus(ctx, account('codex', '-', 'unknown')), 'logged-in');
 
   // Logged in but the app-server gives nothing (acceptance-suite fake without email).
   const noEmail = mkdir('real');
@@ -363,22 +354,12 @@ test('accountStatus: codex matrix and opencode', async () => {
     'codex',
     '#!/bin/sh\nif [ "$1" = login ]; then echo ok; exit 0; fi\nexit 0\n',
   );
-  assert.deepEqual(await accountStatus(makeCtx([noEmail]), account('codex', '-', 'unknown')), {
-    text: 'logged-in',
-  });
-  assert.deepEqual(await accountStatus(makeCtx([noEmail]), account('codex', '-', 'x@y.z')), {
-    text: 'logged-in',
-  });
+  assert.equal(await accountStatus(makeCtx([noEmail]), account('codex', '-', 'unknown')), 'logged-in');
+  assert.equal(await accountStatus(makeCtx([noEmail]), account('codex', '-', 'x@y.z')), 'logged-in');
 
   const loggedOut = mkdir('real');
   script(loggedOut, 'codex', '#!/bin/sh\nexit 1\n');
-  assert.deepEqual(await accountStatus(makeCtx([loggedOut]), account('codex', '-', 'x@y.z')), {
-    text: 'logged-out/unknown',
-  });
-  assert.deepEqual(await accountStatus(makeCtx([]), account('codex', '-', 'x@y.z')), {
-    text: 'logged-out/unknown',
-  });
-  assert.deepEqual(await accountStatus(makeCtx([]), account('opencode', '-', 'x@y.z')), {
-    text: '?',
-  });
+  assert.equal(await accountStatus(makeCtx([loggedOut]), account('codex', '-', 'x@y.z')), 'logged-out/unknown');
+  assert.equal(await accountStatus(makeCtx([]), account('codex', '-', 'x@y.z')), 'logged-out/unknown');
+  assert.equal(await accountStatus(makeCtx([]), account('opencode', '-', 'x@y.z')), '?');
 });

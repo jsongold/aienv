@@ -7,28 +7,24 @@ import * as path from 'node:path';
 import * as tty from 'node:tty';
 
 import { APPS, AienvError, isApp, usageError } from './types.ts';
-import type { App, Ctx, Identity } from './types.ts';
+import type { Account, App, Ctx, Identity } from './types.ts';
 import {
   accountLabel,
   accountsLoad,
-  displayLinkPath,
   genId,
   linkClaudeShared,
   metaWrite,
-  renameAccount,
   selectAccount,
 } from './store.ts';
 import { bindingSet, bindingUnset, bindingsRemoveId, resolveStore } from './bindings.ts';
 import {
+  AGENTS,
   ALL_KEY_VARS,
   accountStatus,
-  captureApp,
+  captureAppAsync,
   defaultIdentity,
   detectIdentity,
-  envVarFor,
   firstInPath,
-  loginArgs,
-  logoutArgs,
   runApp,
 } from './agents.ts';
 
@@ -60,7 +56,6 @@ export function usage(ctx: Ctx): string {
     '  switch <app> --none             drop the binding for this directory',
     '  show [--no-status]              accounts, bindings and warnings',
     '  remove <app> <match>            log out and delete an account store',
-    '  resolve <app> [dir]             print the store bound for dir (plumbing)',
     '  help',
     '',
     'match: an id, an exact org/email, an exact email, or a unique substring.',
@@ -106,33 +101,29 @@ function sleepMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** One line from fd 0, synchronously. null = EOF before any byte. The prompt goes to
- *  stderr only when stdin is a TTY (zsh `read "v?prompt"`). Leading/trailing blanks are
- *  stripped like zsh `read -r` with the default IFS. */
+/** One line from fd 0, synchronously, a byte at a time so a later prompt still sees the
+ *  rest of a piped stdin. null = EOF before any byte. The prompt goes to stderr only when
+ *  stdin is a TTY (zsh `read "v?prompt"`); blanks are trimmed like zsh `read -r`. */
 function readLine(prompt: string): string | null {
   if (tty.isatty(0)) process.stderr.write(prompt);
   const bytes: number[] = [];
   const buf = Buffer.alloc(1);
-  let sawAny = false;
+  let got = 0;
   for (;;) {
-    let n = 0;
     try {
-      n = fs.readSync(0, buf, 0, 1, null);
+      got = fs.readSync(0, buf, 0, 1, null);
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
       if (code === 'EAGAIN' || code === 'EINTR') {
         sleepMs(10);
         continue;
       }
-      if (code === 'EOF') break;
-      break; // unreadable stdin (closed fd, EISDIR, ...) behaves like EOF
+      got = 0; // unreadable stdin (closed fd, EISDIR, ...) behaves like EOF
     }
-    if (n === 0) break;
-    sawAny = true;
-    if (buf[0] === 0x0a) break;
+    if (got === 0 || buf[0] === 0x0a) break;
     bytes.push(buf[0]!);
   }
-  if (!sawAny) return null;
+  if (got === 0 && bytes.length === 0) return null;
   return Buffer.from(bytes)
     .toString('utf8')
     .replace(/^[ \t]+|[ \t\r]+$/g, '');
@@ -193,27 +184,18 @@ export async function cmdAdd(ctx: Ctx, args: string[]): Promise<number> {
   const appArg = args[0] ?? '';
   if (appArg === '') throw usageError('usage: aienv add <app>');
   const app = requireApp(appArg);
-  const envVar = envVarFor(app);
+  const { envVar, login } = AGENTS[app];
   fs.mkdirSync(ctx.storeDir, { recursive: true });
   const id = genId(ctx);
   const store = path.join(ctx.storeDir, id);
 
-  // Until meta is written, any failure or signal removes the half-created store.
-  let pending = true;
-  const discard = (): void => {
-    if (!pending) return;
-    pending = false;
-    fs.rmSync(store, { recursive: true, force: true });
-  };
-  // Prepended: runs before cli.ts' handler, which exits.
-  process.prependListener('SIGINT', discard);
-  process.prependListener('SIGTERM', discard);
-  process.prependListener('exit', discard);
-
+  // Until meta is written, a failure removes the half-created store. So does a signal:
+  // cli.ts turns it into process.exit, which skips catch/finally but runs 'exit' hooks.
+  const discard = (): void => fs.rmSync(store, { recursive: true, force: true });
+  process.once('exit', discard);
   let identity: Identity;
   try {
     fs.mkdirSync(store, { recursive: true });
-    const login = loginArgs(app);
     err(`aienv: running '${app} ${login.join(' ')}' with ${envVar}=${store}`);
     const rc = runApp(ctx, app, store, login);
     await yieldToEventLoop();
@@ -234,20 +216,14 @@ export async function cmdAdd(ctx: Ctx, args: string[]): Promise<number> {
     }
     rejectDuplicate(ctx, app, identity.org, identity.email);
     metaWrite(store, app, identity.org, identity.email);
-    pending = false;
-  } finally {
+  } catch (e) {
     discard();
-    process.removeListener('SIGINT', discard);
-    process.removeListener('SIGTERM', discard);
+    throw e;
+  } finally {
     process.removeListener('exit', discard);
   }
 
   if (app === 'claude') linkClaudeShared(ctx, store);
-  const link = displayLinkPath(ctx, app, identity.org, identity.email);
-  const st = fs.lstatSync(link, { throwIfNoEntry: false });
-  if (st && !st.isSymbolicLink()) die(`${link} exists and is not a symlink; refusing to overwrite`);
-  if (st) fs.unlinkSync(link);
-  fs.symlinkSync(`../../.store/${id}`, link);
   out(`added ${app} ${identity.org}/${identity.email} (${id})`);
   out(`bind it here with: aienv switch ${app} ${id}`);
   return 0;
@@ -316,96 +292,92 @@ export async function cmdRemove(ctx: Ctx, args: string[]): Promise<number> {
     return 0;
   }
   const store = path.join(ctx.storeDir, acc.id);
-  const logout = logoutArgs(app);
-  if (captureApp(ctx, app, store, logout) === null) {
+  const { logout } = AGENTS[app];
+  if ((await captureAppAsync(ctx, app, store, logout)) === null) {
     warn(`'${app} ${logout.join(' ')}' failed or is unavailable; removing the local store anyway`);
   }
   fs.rmSync(store, { recursive: true, force: true });
-  const link = displayLinkPath(ctx, app, acc.org, acc.email);
-  if (fs.lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink()) {
-    fs.rmSync(link, { force: true });
-  }
-  for (const d of [path.dirname(link), path.join(ctx.home, app)]) {
-    try {
-      fs.rmdirSync(d);
-    } catch {
-      // not empty (or already gone): keep it
-    }
-  }
   bindingsRemoveId(ctx, acc.id);
   out(`removed ${app} ${label}`);
   return 0;
 }
 
-// --- resolve --------------------------------------------------------------------
-
-export async function cmdResolve(ctx: Ctx, args: string[]): Promise<number> {
-  const appArg = args[0] ?? '';
-  if (appArg === '') throw usageError('usage: aienv resolve <app> [dir]');
-  const app = requireApp(appArg);
-  const dir = resolveA(ctx, args[1] ?? ctx.cwd);
-  const res = resolveStore(ctx, app, dir);
-  if (res.store !== null) {
-    out(res.store);
-    return 0;
-  }
-  if (res.dangling) {
-    err(`aienv: binding for ${res.dir} points at missing account ${res.id}; run: aienv switch ${app}`);
-  }
-  return 1;
-}
-
 // --- show -----------------------------------------------------------------------
 
-async function showApp(ctx: Ctx, app: App, dir: string, noStatus: boolean): Promise<void> {
+type AppReport = {
+  app: App;
+  src: string;
+  boundId: string;
+  unbound: boolean;
+  accounts: Account[];
+  def: Identity | null;
+  statuses: string[] | null;
+};
+
+/** Asks the agents (all accounts and the default login at once); prints nothing. */
+async function collectApp(ctx: Ctx, app: App, dir: string, noStatus: boolean): Promise<AppReport> {
   const res = resolveStore(ctx, app, dir);
   let src = 'none';
-  if (res.store !== null) src = res.source === 'dir' ? `dir: ${res.dir}` : 'global';
-  else if (res.dangling) src = `${res.dir} -> DANGLING ${res.id}`;
-  out('');
-  out(`${app}  [${src}]`);
+  if (res.dangling) src = `${res.dir} -> DANGLING ${res.id}`;
+  else if (res.id !== '') src = res.dir === '*' ? 'global' : `dir: ${res.dir}`;
   const accounts = accountsLoad(ctx, app);
-  if (accounts.length === 0) {
-    out('  (no accounts)');
-    return;
-  }
   // Nothing bound (or dangling): the agent runs with its own default login.
   // When that login is identifiable, star the stored account it equals.
   const unbound = res.id === '' || res.dangling;
-  let def: Identity | null = null;
-  if (unbound && !noStatus) {
-    def = await defaultIdentity(ctx, app);
-    if (def !== null && def.email === '') def = null;
+  const probeDefault = unbound && !noStatus && accounts.length > 0;
+  const [def, statuses] = await Promise.all([
+    probeDefault ? defaultIdentity(ctx, app) : Promise.resolve(null),
+    noStatus ? Promise.resolve(null) : Promise.all(accounts.map((acc) => accountStatus(ctx, acc))),
+  ]);
+  return {
+    app,
+    src,
+    boundId: res.id,
+    unbound,
+    accounts,
+    def: def !== null && def.email === '' ? null : def,
+    statuses,
+  };
+}
+
+/**
+ * The account label `show` prints: the org name, or the email's domain when the
+ * org says nothing (codex/opencode store `-`; a personal claude org is just
+ * `<email>'s Organization`).
+ */
+function showLabel(org: string, email: string): string {
+  if (org !== '' && org !== '-' && org !== `${email}'s Organization`) return org;
+  const at = email.indexOf('@');
+  return at === -1 ? email : email.slice(at + 1);
+}
+
+function showApp(r: AppReport): void {
+  out('');
+  out(`${r.app}  [${r.src}]`);
+  if (r.accounts.length === 0) {
+    out('  (no accounts)');
+    return;
   }
+  const rows: { mark: string; label: string; email: string; id: string; st: string }[] = [];
   let starred = false;
-  for (const acc of accounts) {
+  r.accounts.forEach((acc, i) => {
     let mark = ' ';
-    if (!unbound) {
-      if (acc.id === res.id) mark = '*';
-    } else if (def !== null && !starred && acc.org === def.org && acc.email === def.email) {
+    if (!r.unbound) {
+      if (acc.id === r.boundId) mark = '*';
+    } else if (r.def !== null && !starred && acc.org === r.def.org && acc.email === r.def.email) {
       mark = '*';
       starred = true;
     }
-    let email = acc.email;
-    let st = '-';
-    if (!noStatus) {
-      const status = await accountStatus(ctx, acc);
-      st = status.text;
-      const found = status.detectedEmail;
-      if (found !== undefined && found !== '') {
-        // Stored before aienv could ask codex: adopt the reported email.
-        if (renameAccount(ctx, acc, found)) {
-          email = found;
-          st = `logged-in  (email detected: ${found})`;
-        }
-      }
-    }
-    if (unbound && mark === '*') st = `${st}  (via default login, unbound)`;
-    out(`  ${mark} ${acc.org}/${email}  (${acc.id})  ${st}`);
-  }
-  if (unbound && !starred) {
-    if (def !== null) out(`  * ${def.org}/${def.email}  (default ${app} login; not managed by aienv)`);
-    else out(`  * (default ${app} login; not managed by aienv)`);
+    // The plain `logged-in` is the expected state, so only the other statuses are shown.
+    const raw = r.statuses === null ? '' : r.statuses[i]!;
+    const st = raw === 'logged-in' ? '' : raw;
+    rows.push({ mark, label: showLabel(acc.org, acc.email), email: acc.email, id: `(${acc.id})`, st });
+  });
+  const labelW = Math.max(...rows.map((row) => row.label.length));
+  const emailW = Math.max(...rows.map((row) => row.email.length));
+  for (const row of rows) {
+    const head = `  ${row.mark} ${row.label.padEnd(labelW)}  ${row.email.padEnd(emailW)}  ${row.id}`;
+    out(row.st === '' ? head : `${head}  ${row.st}`);
   }
 }
 
@@ -438,7 +410,8 @@ export async function cmdShow(ctx: Ctx, args: string[]): Promise<number> {
   }
   const dir = here(ctx);
   out(`dir: ${dir}`);
-  for (const app of APPS) await showApp(ctx, app, dir, noStatus);
+  const reports = await Promise.all(APPS.map((app) => collectApp(ctx, app, dir, noStatus)));
+  for (const r of reports) showApp(r);
   showWarnings(ctx);
   return 0;
 }

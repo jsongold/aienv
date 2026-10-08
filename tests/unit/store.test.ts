@@ -8,13 +8,10 @@ import {
   CLAUDE_SHARED,
   accountLabel,
   accountsLoad,
-  displayLinkPath,
   genId,
   linkClaudeShared,
   metaRead,
   metaWrite,
-  renameAccount,
-  sanitize,
   selectAccount,
 } from '../../src/store.ts';
 import { AienvError } from '../../src/types.ts';
@@ -31,7 +28,6 @@ function mkCtx(t: { after: (fn: () => void) => void }): { ctx: Ctx; tmp: string 
     home,
     storeDir: path.join(home, '.store'),
     bindingsPath: path.join(home, 'bindings'),
-    lockDir: path.join(home, '.lock'),
     userHome,
     env: {},
     cwd: tmp,
@@ -54,35 +50,6 @@ function throwsAienv(fn: () => unknown, message: string): void {
     return true;
   });
 }
-
-// --- sanitize ------------------------------------------------------------------
-
-test('sanitize: plain values pass through', () => {
-  assert.equal(sanitize('me@example.com'), 'me@example.com');
-  assert.equal(sanitize('Acme Inc'), 'Acme Inc');
-  assert.equal(sanitize('a.b-c'), 'a.b-c');
-});
-
-test('sanitize: control chars and slashes become _', () => {
-  assert.equal(sanitize('a\tb\nc\x7fd\x00e'), 'a_b_c_d_e');
-  assert.equal(sanitize('a/b//c'), 'a_b__c');
-  assert.equal(sanitize('../../etc'), '_.._.._etc');
-  assert.equal(sanitize('/'), '_');
-});
-
-test('sanitize: empty, dot and dotdot become _', () => {
-  assert.equal(sanitize(''), '_');
-  assert.equal(sanitize('.'), '_');
-  assert.equal(sanitize('..'), '_');
-});
-
-test('sanitize: lone dash kept, leading dash or dot prefixed', () => {
-  assert.equal(sanitize('-'), '-');
-  assert.equal(sanitize('--'), '_--');
-  assert.equal(sanitize('-rf'), '_-rf');
-  assert.equal(sanitize('.hidden'), '_.hidden');
-  assert.equal(sanitize('...'), '_...');
-});
 
 // --- genId ---------------------------------------------------------------------
 
@@ -275,45 +242,6 @@ test('selectAccount: ambiguous substring', (t) => {
   );
 });
 
-// --- displayLinkPath -----------------------------------------------------------
-
-test('displayLinkPath: creates the org dir and returns the sanitized path', (t) => {
-  const { ctx } = mkCtx(t);
-  const link = displayLinkPath(ctx, 'claude', 'Acme/Inc', '.me@example.com');
-  assert.equal(link, `${ctx.home}/claude/Acme_Inc/_.me@example.com`);
-  assert.ok(fs.statSync(`${ctx.home}/claude/Acme_Inc`).isDirectory());
-  assert.equal(fs.lstatSync(link, { throwIfNoEntry: false }), undefined);
-  assert.equal(displayLinkPath(ctx, 'codex', '-', 'unknown'), `${ctx.home}/codex/-/unknown`);
-  // traversal attempts collapse into one component
-  assert.equal(displayLinkPath(ctx, 'codex', '..', '../x'), `${ctx.home}/codex/_/_.._x`);
-});
-
-test('displayLinkPath: refuses an org dir that is a symlink pointing outside', (t) => {
-  const { ctx, tmp } = mkCtx(t);
-  const outside = path.join(tmp, 'outside');
-  fs.mkdirSync(outside);
-  fs.mkdirSync(`${ctx.home}/claude`);
-  fs.symlinkSync(outside, `${ctx.home}/claude/Evil`);
-  throwsAienv(
-    () => displayLinkPath(ctx, 'claude', 'Evil', 'me@example.com'),
-    `refusing to create a display symlink outside ${ctx.home}/claude`,
-  );
-  // a symlink back to the base itself is not strictly inside either
-  fs.symlinkSync('.', `${ctx.home}/claude/Self`);
-  throwsAienv(
-    () => displayLinkPath(ctx, 'claude', 'Self', 'me@example.com'),
-    `refusing to create a display symlink outside ${ctx.home}/claude`,
-  );
-});
-
-test('displayLinkPath: works when AIENV_HOME itself is reached through a symlink', (t) => {
-  const { ctx, tmp } = mkCtx(t);
-  const alias = path.join(tmp, 'alias');
-  fs.symlinkSync(ctx.home, alias);
-  const ctx2: Ctx = { ...ctx, home: alias, storeDir: `${alias}/.store` };
-  assert.equal(displayLinkPath(ctx2, 'claude', 'Acme', 'a@example.com'), `${alias}/claude/Acme/a@example.com`);
-});
-
 // --- linkClaudeShared ----------------------------------------------------------
 
 test('CLAUDE_SHARED matches the spec and holds no credentials', () => {
@@ -349,74 +277,4 @@ test('linkClaudeShared: links existing items, creates projects, skips the rest',
   // idempotent
   linkClaudeShared(ctx, acc.store);
   assert.deepEqual(fs.readdirSync(acc.store).sort(), ['.aienv-meta', 'CLAUDE.md', 'projects', 'settings.json', 'skills']);
-});
-
-// --- renameAccount -------------------------------------------------------------
-
-function linkFor(ctx: Ctx, acc: Account): string {
-  const link = displayLinkPath(ctx, acc.app, acc.org, acc.email);
-  fs.symlinkSync(`../../.store/${acc.id}`, link);
-  return link;
-}
-
-test('renameAccount: rewrites meta, creates the new relative link, removes the old', (t) => {
-  const { ctx } = mkCtx(t);
-  const acc = addAccount(ctx, 'aaaa0001', 'codex', '-', 'unknown');
-  const oldLink = linkFor(ctx, acc);
-
-  assert.equal(renameAccount(ctx, acc, 'me@example.com'), true);
-
-  assert.deepEqual(metaRead(path.join(acc.store, '.aienv-meta')), { app: 'codex', org: '-', email: 'me@example.com' });
-  const newLink = `${ctx.home}/codex/-/me@example.com`;
-  assert.equal(fs.readlinkSync(newLink), '../../.store/aaaa0001');
-  assert.equal(fs.realpathSync(newLink), fs.realpathSync(acc.store));
-  assert.equal(fs.lstatSync(oldLink, { throwIfNoEntry: false }), undefined);
-  assert.equal(accountLabel(ctx, 'codex', 'aaaa0001'), '-/me@example.com');
-});
-
-test('renameAccount: replaces a stale symlink at the new path; keeps a non-symlink old path', (t) => {
-  const { ctx } = mkCtx(t);
-  const acc = addAccount(ctx, 'aaaa0001', 'codex', '-', 'unknown');
-  const oldPath = displayLinkPath(ctx, 'codex', '-', 'unknown');
-  fs.writeFileSync(oldPath, 'not a symlink');
-  fs.symlinkSync('../../.store/gone', `${ctx.home}/codex/-/me@example.com`);
-
-  assert.equal(renameAccount(ctx, acc, 'me@example.com'), true);
-  assert.equal(fs.readlinkSync(`${ctx.home}/codex/-/me@example.com`), '../../.store/aaaa0001');
-  assert.equal(fs.readFileSync(oldPath, 'utf8'), 'not a symlink');
-});
-
-test('renameAccount: conflict with another account changes nothing', (t) => {
-  const { ctx } = mkCtx(t);
-  const acc = addAccount(ctx, 'aaaa0001', 'codex', '-', 'unknown');
-  const other = addAccount(ctx, 'bbbb0002', 'codex', '-', 'me@example.com');
-  const oldLink = linkFor(ctx, acc);
-  const otherLink = linkFor(ctx, other);
-
-  assert.equal(renameAccount(ctx, acc, 'me@example.com'), false);
-
-  assert.equal(metaRead(path.join(acc.store, '.aienv-meta')).email, 'unknown');
-  assert.equal(fs.readlinkSync(oldLink), '../../.store/aaaa0001');
-  assert.equal(fs.readlinkSync(otherLink), '../../.store/bbbb0002');
-});
-
-test('renameAccount: same email under another org or app is not a conflict', (t) => {
-  const { ctx } = mkCtx(t);
-  const acc = addAccount(ctx, 'aaaa0001', 'codex', '-', 'unknown');
-  addAccount(ctx, 'bbbb0002', 'codex', 'Org', 'me@example.com');
-  addAccount(ctx, 'cccc0003', 'claude', '-', 'me@example.com');
-  assert.equal(renameAccount(ctx, acc, 'me@example.com'), true);
-});
-
-test('renameAccount: a non-symlink in the way is a conflict', (t) => {
-  const { ctx } = mkCtx(t);
-  const acc = addAccount(ctx, 'aaaa0001', 'codex', '-', 'unknown');
-  const oldLink = linkFor(ctx, acc);
-  fs.mkdirSync(`${ctx.home}/codex/-/me@example.com`);
-
-  assert.equal(renameAccount(ctx, acc, 'me@example.com'), false);
-
-  assert.equal(metaRead(path.join(acc.store, '.aienv-meta')).email, 'unknown');
-  assert.equal(fs.readlinkSync(oldLink), '../../.store/aaaa0001');
-  assert.ok(fs.statSync(`${ctx.home}/codex/-/me@example.com`).isDirectory());
 });

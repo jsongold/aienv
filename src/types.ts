@@ -15,8 +15,6 @@ export type Ctx = {
   storeDir: string;
   /** $AIENV_HOME/bindings */
   bindingsPath: string;
-  /** $AIENV_HOME/.lock */
-  lockDir: string;
   /** The user's $HOME. */
   userHome: string;
   /** Snapshot of process.env. */
@@ -38,12 +36,10 @@ export type Account = {
 
 export type Identity = { org: string; email: string };
 
+/** What the bindings file says for one app and directory. */
 export type Resolution = {
-  /** Store path when the bound account exists, else null. */
-  store: string | null;
   /** Bound account id, '' when nothing is bound. */
   id: string;
-  source: 'dir' | 'global' | 'none';
   /** The binding's dir column ('*' for global), '' when none. */
   dir: string;
   /** A binding exists but its store directory is missing. */

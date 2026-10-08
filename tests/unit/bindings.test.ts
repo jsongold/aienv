@@ -9,11 +9,8 @@ import {
   bindingUnset,
   bindingsRemoveId,
   readBindings,
-  releaseLockIfHeld,
   resolveStore,
-  withLock,
 } from '../../src/bindings.ts';
-import { AienvError } from '../../src/types.ts';
 import type { Ctx } from '../../src/types.ts';
 
 function makeCtx(t: { after: (fn: () => void) => void }, createHome = true): Ctx {
@@ -25,7 +22,6 @@ function makeCtx(t: { after: (fn: () => void) => void }, createHome = true): Ctx
     home,
     storeDir: `${home}/.store`,
     bindingsPath: `${home}/bindings`,
-    lockDir: `${home}/.lock`,
     userHome: root,
     env: {},
     cwd: root,
@@ -106,7 +102,7 @@ test('bindingSet replaces only the same app+dir', (t) => {
   assert.equal(raw(ctx), 'codex\t/a\tcx\nclaude\t/a/b\tsub\nclaude\t/a\tnew\n');
 });
 
-test('bindingSet creates home and the file when missing, leaves no temp or lock', (t) => {
+test('bindingSet creates home and the file when missing, leaves no temp file', (t) => {
   const ctx = makeCtx(t, false);
   bindingSet(ctx, 'claude', '*', 'g1');
   assert.equal(raw(ctx), 'claude\t*\tg1\n');
@@ -137,7 +133,7 @@ test('bindingsRemoveId drops the id across apps', (t) => {
 
 test('resolveStore: none without file or matching binding', (t) => {
   const ctx = makeCtx(t);
-  const none = { store: null, id: '', source: 'none', dir: '', dangling: false };
+  const none = { id: '', dir: '', dangling: false };
   assert.deepEqual(resolveStore(ctx, 'claude', '/a'), none);
   fs.writeFileSync(ctx.bindingsPath, 'codex\t/a\tid1\nclaude\t/other\tid2\n');
   assert.deepEqual(resolveStore(ctx, 'claude', '/a'), none);
@@ -146,12 +142,10 @@ test('resolveStore: none without file or matching binding', (t) => {
 test('resolveStore: nearest ancestor wins regardless of line order', (t) => {
   const ctx = makeCtx(t);
   mkStore(ctx, 'outer');
-  const inner = mkStore(ctx, 'inner');
+  mkStore(ctx, 'inner');
   fs.writeFileSync(ctx.bindingsPath, 'claude\t/a/b\tinner\nclaude\t/a\touter\nclaude\t/a/b/c/d\tdeep\n');
   assert.deepEqual(resolveStore(ctx, 'claude', '/a/b/c'), {
-    store: inner,
     id: 'inner',
-    source: 'dir',
     dir: '/a/b',
     dangling: false,
   });
@@ -163,8 +157,8 @@ test('resolveStore: a prefix that is not a path ancestor does not match', (t) =>
   const ctx = makeCtx(t);
   mkStore(ctx, 'id1');
   fs.writeFileSync(ctx.bindingsPath, 'claude\t/a/b\tid1\n');
-  assert.equal(resolveStore(ctx, 'claude', '/a/bc').source, 'none');
-  assert.equal(resolveStore(ctx, 'claude', '/a').source, 'none');
+  assert.equal(resolveStore(ctx, 'claude', '/a/bc').id, '');
+  assert.equal(resolveStore(ctx, 'claude', '/a').id, '');
 });
 
 test('resolveStore: trailing slash on the binding dir is ignored, dir reported verbatim', (t) => {
@@ -178,14 +172,12 @@ test('resolveStore: trailing slash on the binding dir is ignored, dir reported v
 
 test("resolveStore: '/' binding matches everything but loses to a nearer one", (t) => {
   const ctx = makeCtx(t);
-  const root = mkStore(ctx, 'root');
+  mkStore(ctx, 'root');
   mkStore(ctx, 'near');
   mkStore(ctx, 'glob');
   fs.writeFileSync(ctx.bindingsPath, 'claude\t*\tglob\nclaude\t/\troot\nclaude\t/a\tnear\n');
   assert.deepEqual(resolveStore(ctx, 'claude', '/zzz/y'), {
-    store: root,
     id: 'root',
-    source: 'dir',
     dir: '/',
     dangling: false,
   });
@@ -195,14 +187,12 @@ test("resolveStore: '/' binding matches everything but loses to a nearer one", (
 
 test('resolveStore: global fallback uses the first * line; dir beats global', (t) => {
   const ctx = makeCtx(t);
-  const g1 = mkStore(ctx, 'g1');
+  mkStore(ctx, 'g1');
   mkStore(ctx, 'g2');
   mkStore(ctx, 'd1');
   fs.writeFileSync(ctx.bindingsPath, 'codex\t*\tcx\nclaude\t*\tg1\nclaude\t*\tg2\nclaude\t/a\td1\n');
   assert.deepEqual(resolveStore(ctx, 'claude', '/elsewhere'), {
-    store: g1,
     id: 'g1',
-    source: 'global',
     dir: '*',
     dangling: false,
   });
@@ -221,107 +211,15 @@ test('resolveStore: dangling when the store is missing or not a directory', (t) 
   const ctx = makeCtx(t);
   fs.writeFileSync(ctx.bindingsPath, 'claude\t/a\tgone\ncodex\t*\tfile\n');
   assert.deepEqual(resolveStore(ctx, 'claude', '/a/b'), {
-    store: null,
     id: 'gone',
-    source: 'dir',
     dir: '/a',
     dangling: true,
   });
   fs.mkdirSync(ctx.storeDir);
   fs.writeFileSync(`${ctx.storeDir}/file`, '');
   assert.deepEqual(resolveStore(ctx, 'codex', '/q'), {
-    store: null,
     id: 'file',
-    source: 'global',
     dir: '*',
     dangling: true,
   });
-});
-
-// --- lock ---------------------------------------------------------------------
-
-test('withLock: held during fn, released after success, returns the value', (t) => {
-  const ctx = makeCtx(t, false);
-  const v = withLock(ctx, () => {
-    assert.ok(fs.statSync(ctx.lockDir).isDirectory());
-    assert.equal(fs.readFileSync(`${ctx.lockDir}/pid`, 'utf8').trim(), String(process.pid));
-    return 42;
-  });
-  assert.equal(v, 42);
-  assert.equal(fs.existsSync(ctx.lockDir), false);
-});
-
-test('withLock: released after fn throws', (t) => {
-  const ctx = makeCtx(t);
-  assert.throws(
-    () =>
-      withLock(ctx, () => {
-        throw new Error('boom');
-      }),
-    /boom/,
-  );
-  assert.equal(fs.existsSync(ctx.lockDir), false);
-  assert.equal(withLock(ctx, () => 'again'), 'again');
-});
-
-test('withLock: breaks a stale lock (with or without pid file)', (t) => {
-  const ctx = makeCtx(t);
-  const old = new Date(Date.now() - 11_000);
-  for (const withPid of [true, false]) {
-    fs.mkdirSync(ctx.lockDir);
-    if (withPid) fs.writeFileSync(`${ctx.lockDir}/pid`, '999999\n');
-    fs.utimesSync(ctx.lockDir, old, old);
-    assert.equal(withLock(ctx, () => 'ok'), 'ok');
-    assert.equal(fs.existsSync(ctx.lockDir), false);
-  }
-});
-
-test('withLock: a fresh lock held by someone else -> AienvError, lock untouched', (t) => {
-  const ctx = makeCtx(t);
-  fs.mkdirSync(ctx.lockDir);
-  fs.writeFileSync(`${ctx.lockDir}/pid`, '999999\n');
-  let ran = false;
-  const started = Date.now();
-  assert.throws(
-    () =>
-      withLock(ctx, () => {
-        ran = true;
-      }),
-    (err: unknown) => {
-      assert.ok(err instanceof AienvError);
-      assert.equal(err.message, `another aienv is holding ${ctx.lockDir}; retry shortly`);
-      assert.equal(err.exitCode, 1);
-      return true;
-    },
-  );
-  assert.equal(ran, false);
-  assert.ok(Date.now() - started >= 1900);
-  assert.equal(fs.readFileSync(`${ctx.lockDir}/pid`, 'utf8'), '999999\n');
-  assert.equal(fs.existsSync(ctx.bindingsPath), false);
-});
-
-test('releaseLockIfHeld: releases only a lock owned by this pid', (t) => {
-  const ctx = makeCtx(t);
-  releaseLockIfHeld(ctx); // no lock: no-op
-
-  fs.mkdirSync(ctx.lockDir);
-  releaseLockIfHeld(ctx); // no pid marker: not ours
-  assert.equal(fs.existsSync(ctx.lockDir), true);
-
-  fs.writeFileSync(`${ctx.lockDir}/pid`, `${process.pid + 1}\n`);
-  releaseLockIfHeld(ctx);
-  assert.equal(fs.existsSync(ctx.lockDir), true);
-
-  fs.writeFileSync(`${ctx.lockDir}/pid`, `${process.pid}\n`);
-  releaseLockIfHeld(ctx);
-  assert.equal(fs.existsSync(ctx.lockDir), false);
-});
-
-test('releaseLockIfHeld: usable from inside the critical section (signal path)', (t) => {
-  const ctx = makeCtx(t);
-  withLock(ctx, () => {
-    releaseLockIfHeld(ctx);
-    assert.equal(fs.existsSync(ctx.lockDir), false);
-  });
-  assert.equal(fs.existsSync(ctx.lockDir), false);
 });

@@ -51,9 +51,6 @@ different directory resolves that directory's account.
 `aienv` resolves accounts by, in order: exact id, exact `org/email`, exact email,
 then a unique case-insensitive substring of `org/email`.
 
-`$AIENV_HOME/<app>/<org>/<email>` symlinks are for browsing only; the env var always
-carries the stable `.store/<id>` path.
-
 For `claude`, shared non-credential items (`CLAUDE.md`, `settings.json`, `skills`,
 `agents`, `commands`, `hooks`, `rules`, `keybindings.json`, `projects`) are symlinked
 from `~/.claude` into a store (the list is `CLAUDE_SHARED` in `src/store.ts`).

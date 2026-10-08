@@ -1,5 +1,6 @@
-// aienv entry point: builds the Ctx, dispatches, maps errors to stderr + exit codes and
-// cleans up on exit / SIGINT (130) / SIGTERM (143).
+// aienv entry point: builds the Ctx, dispatches and maps errors to stderr + exit codes.
+// SIGINT / SIGTERM exit with 130 / 143 once the running agent child has returned, so a
+// command's cleanup ('exit' listeners) still runs.
 // Installed as $AIENV_HOME/lib/aienv/cli.ts and run with `node` (native type stripping).
 
 import * as fs from 'node:fs';
@@ -9,8 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 import { AienvError } from './types.ts';
 import type { Ctx } from './types.ts';
-import { releaseLockIfHeld } from './bindings.ts';
-import { cmdAdd, cmdRemove, cmdResolve, cmdShow, cmdSwitch, usage } from './commands.ts';
+import { cmdAdd, cmdRemove, cmdShow, cmdSwitch, usage } from './commands.ts';
 
 function isDir(p: string): boolean {
   return fs.statSync(p, { throwIfNoEntry: false })?.isDirectory() ?? false;
@@ -60,7 +60,6 @@ function buildCtx(): Ctx {
     home,
     storeDir: `${home}/.store`,
     bindingsPath: `${home}/bindings`,
-    lockDir: `${home}/.lock`,
     userHome,
     env,
     cwd: logicalCwd(env),
@@ -80,8 +79,6 @@ async function main(ctx: Ctx, argv: string[]): Promise<number> {
     case 'remove':
     case 'rm':
       return cmdRemove(ctx, rest);
-    case 'resolve':
-      return cmdResolve(ctx, rest);
     case 'help':
     case '-h':
     case '--help':
@@ -94,23 +91,8 @@ async function main(ctx: Ctx, argv: string[]): Promise<number> {
 
 const ctx = buildCtx();
 
-function cleanup(): void {
-  try {
-    releaseLockIfHeld(ctx);
-  } catch {
-    // best effort
-  }
-}
-
-process.on('exit', cleanup);
-process.on('SIGINT', () => {
-  cleanup();
-  process.exit(130);
-});
-process.on('SIGTERM', () => {
-  cleanup();
-  process.exit(143);
-});
+process.on('SIGINT', () => process.exit(130));
+process.on('SIGTERM', () => process.exit(143));
 
 let code: number;
 try {
@@ -125,5 +107,4 @@ try {
     code = 1;
   }
 }
-cleanup();
 process.exit(code);
