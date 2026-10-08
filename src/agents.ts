@@ -165,27 +165,8 @@ export function runApp(ctx: Ctx, app: App, store: string, args: string[]): numbe
   return 1;
 }
 
-export function captureApp(
-  ctx: Ctx,
-  app: App,
-  store: string | null,
-  args: string[],
-): string | null {
-  const bin = findRealBin(ctx, app);
-  if (bin === null) return null;
-  const res = spawnSync(bin, args, {
-    env: childEnv(ctx, app, store),
-    cwd: ctx.cwd,
-    stdio: ['ignore', 'pipe', 'ignore'],
-    encoding: 'utf8',
-    timeout: 30_000,
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  if (res.error || res.status !== 0) return null;
-  return res.stdout;
-}
-
-/** captureApp without blocking, so several agents can be asked at once. */
+/** Runs the agent against a store and returns its stdout; null when it is missing, fails
+ *  or exceeds the timeout. Non-blocking so several agents can be asked at once. */
 export function captureAppAsync(
   ctx: Ctx,
   app: App,

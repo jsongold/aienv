@@ -21,7 +21,7 @@ import { bindingSet, bindingUnset, bindingsRemoveId, resolveStore } from './bind
 import {
   ALL_KEY_VARS,
   accountStatus,
-  captureApp,
+  captureAppAsync,
   defaultIdentity,
   detectIdentity,
   envVarFor,
@@ -316,7 +316,7 @@ export async function cmdRemove(ctx: Ctx, args: string[]): Promise<number> {
   }
   const store = path.join(ctx.storeDir, acc.id);
   const logout = logoutArgs(app);
-  if (captureApp(ctx, app, store, logout) === null) {
+  if ((await captureAppAsync(ctx, app, store, logout)) === null) {
     warn(`'${app} ${logout.join(' ')}' failed or is unavailable; removing the local store anyway`);
   }
   fs.rmSync(store, { recursive: true, force: true });

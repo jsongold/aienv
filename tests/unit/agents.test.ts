@@ -7,7 +7,6 @@ import { after, test } from 'node:test';
 import {
   ALL_KEY_VARS,
   accountStatus,
-  captureApp,
   captureAppAsync,
   codexEmail,
   defaultIdentity,
@@ -189,22 +188,7 @@ test('runApp returns 127 without a real binary and 128+n on a signal', () => {
   assert.equal(runApp(makeCtx([real]), 'codex', '/s', []), 128 + 15);
 });
 
-test('captureApp captures stdout; null on failure or missing binary', () => {
-  const real = mkdir('real');
-  script(
-    real,
-    'codex',
-    '#!/bin/sh\nif [ "$1" = fail ]; then echo partial; exit 3; fi\necho "noise" >&2\necho "HOME=${CODEX_HOME-unset} KEY=${OPENAI_API_KEY-unset}"\n',
-  );
-  const ctx = makeCtx([real], { OPENAI_API_KEY: 'k', CODEX_HOME: '/user/codex' });
-  assert.equal(captureApp(ctx, 'codex', '/st', []), 'HOME=/st KEY=unset\n');
-  // store null: codex keeps the user's CODEX_HOME.
-  assert.equal(captureApp(ctx, 'codex', null, []), 'HOME=/user/codex KEY=unset\n');
-  assert.equal(captureApp(ctx, 'codex', '/st', ['fail']), null);
-  assert.equal(captureApp(makeCtx([]), 'codex', '/st', []), null);
-});
-
-test('captureAppAsync matches captureApp: stdout, env, failure, timeout', async () => {
+test('captureAppAsync: stdout, env, failure, timeout', async () => {
   const real = mkdir('real');
   script(
     real,
@@ -219,11 +203,11 @@ test('captureAppAsync matches captureApp: stdout, env, failure, timeout', async 
   assert.equal(await captureAppAsync(makeCtx([]), 'codex', '/st', []), null);
 });
 
-test('captureApp with store null unsets CLAUDE_CONFIG_DIR for claude', () => {
+test('captureAppAsync with store null unsets CLAUDE_CONFIG_DIR for claude', async () => {
   const real = mkdir('real');
   script(real, 'claude', '#!/bin/sh\necho "CFG=${CLAUDE_CONFIG_DIR-unset}"\n');
   const ctx = makeCtx([real], { CLAUDE_CONFIG_DIR: '/bound/store' });
-  assert.equal(captureApp(ctx, 'claude', null, []), 'CFG=unset\n');
+  assert.equal(await captureAppAsync(ctx, 'claude', null, []), 'CFG=unset\n');
 });
 
 test('claude detectIdentity: logged in / logged out / no email / garbage', async () => {
