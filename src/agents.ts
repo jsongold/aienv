@@ -393,27 +393,25 @@ export async function defaultIdentity(ctx: Ctx, app: App): Promise<Identity | nu
   return null;
 }
 
-export type Status = { text: string; detectedEmail?: string };
-
-export async function accountStatus(ctx: Ctx, acc: Account): Promise<Status> {
+export async function accountStatus(ctx: Ctx, acc: Account): Promise<string> {
   if (acc.app === 'claude') {
     const st = await claudeStatus(ctx, acc.store);
-    if (st === null) return { text: '?' };
-    if (st.loggedIn === false) return { text: 'logged-out' };
+    if (st === null) return '?';
+    if (st.loggedIn === false) return 'logged-out';
     if (st.loggedIn === true) {
       const mismatch =
         (st.email !== '' && st.email !== acc.email) ||
         (st.orgName !== '' && st.orgName !== acc.org);
-      return { text: mismatch ? 'logged-in MISMATCH' : 'logged-in' };
+      return mismatch ? 'logged-in MISMATCH' : 'logged-in';
     }
-    return { text: '?' };
+    return '?';
   }
   if (acc.app === 'codex') {
-    if (!(await codexLoggedIn(ctx, acc.store))) return { text: 'logged-out/unknown' };
+    if (!(await codexLoggedIn(ctx, acc.store))) return 'logged-out/unknown';
     const email = await codexEmail(ctx, acc.store);
-    if (email !== '' && acc.email === 'unknown') return { text: 'logged-in', detectedEmail: email };
-    if (email !== '' && email !== acc.email) return { text: 'logged-in MISMATCH' };
-    return { text: 'logged-in' };
+    // 'unknown' was stored because codex gave no email at add time; never a mismatch.
+    if (email !== '' && acc.email !== 'unknown' && email !== acc.email) return 'logged-in MISMATCH';
+    return 'logged-in';
   }
-  return { text: '?' };
+  return '?';
 }

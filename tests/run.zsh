@@ -398,11 +398,10 @@ FAKE_CODEX_EMAIL='auto@example.com' "$AIENV" add codex </dev/null >/dev/null 2>&
 chk codex-add-detects-email "$([[ -L $AIENV_HOME/codex/-/auto@example.com ]] && print 1 || print 0)"
 print -r -- '' | "$AIENV" add codex >/dev/null 2>&1
 chk codex-add-blank-is-unknown "$([[ -L $AIENV_HOME/codex/-/unknown ]] && print 1 || print 0)"
-out=$(FAKE_CODEX_EMAIL='late@example.com' "$AIENV" show 2>&1)
-has codex-show-heals-unknown "$out" 'email detected: late@example.com'
-chk codex-heal-moves-link "$([[ -L $AIENV_HOME/codex/-/late@example.com && ! -L $AIENV_HOME/codex/-/unknown ]] && print 1 || print 0)"
+ID_U=$(readlink -- "$AIENV_HOME/codex/-/unknown"); ID_U=${ID_U:t}
 out=$(FAKE_CODEX_EMAIL='other@example.com' "$AIENV" show 2>&1)
 has codex-show-mismatch "$out" 'logged-in MISMATCH'
+has codex-show-unknown-not-mismatch "$out" "(${ID_U})  logged-in"
 
 chk no-lock-left-behind "$([[ ! -d $AIENV_HOME/.lock ]] && print 1 || print 0)"
 

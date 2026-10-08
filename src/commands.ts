@@ -15,7 +15,6 @@ import {
   genId,
   linkClaudeShared,
   metaWrite,
-  renameAccount,
   selectAccount,
 } from './store.ts';
 import { bindingSet, bindingUnset, bindingsRemoveId, resolveStore } from './bindings.ts';
@@ -31,7 +30,6 @@ import {
   logoutArgs,
   runApp,
 } from './agents.ts';
-import type { Status } from './agents.ts';
 
 // --- output ---------------------------------------------------------------------
 
@@ -365,7 +363,7 @@ type AppReport = {
   unbound: boolean;
   accounts: Account[];
   def: Identity | null;
-  statuses: Status[] | null;
+  statuses: string[] | null;
 };
 
 /** Asks the agents (all accounts and the default login at once); prints nothing. */
@@ -405,7 +403,7 @@ function showLabel(org: string, email: string): string {
   return at === -1 ? email : email.slice(at + 1);
 }
 
-function showApp(ctx: Ctx, r: AppReport): void {
+function showApp(r: AppReport): void {
   out('');
   out(`${r.app}  [${r.src}]`);
   if (r.accounts.length === 0) {
@@ -422,21 +420,8 @@ function showApp(ctx: Ctx, r: AppReport): void {
       mark = '*';
       starred = true;
     }
-    let email = acc.email;
-    let st = '-';
-    if (r.statuses !== null) {
-      const status = r.statuses[i]!;
-      st = status.text;
-      const found = status.detectedEmail;
-      if (found !== undefined && found !== '') {
-        // Stored before aienv could ask codex: adopt the reported email.
-        if (renameAccount(ctx, acc, found)) {
-          email = found;
-          st = `logged-in  (email detected: ${found})`;
-        }
-      }
-    }
-    rows.push({ mark, label: showLabel(acc.org, email), id: `(${acc.id})`, st });
+    const st = r.statuses === null ? '-' : r.statuses[i]!;
+    rows.push({ mark, label: showLabel(acc.org, acc.email), id: `(${acc.id})`, st });
   });
   const labelW = Math.max(...rows.map((row) => row.label.length));
   const idW = Math.max(...rows.map((row) => row.id.length));
@@ -475,7 +460,7 @@ export async function cmdShow(ctx: Ctx, args: string[]): Promise<number> {
   const dir = here(ctx);
   out(`dir: ${dir}`);
   const reports = await Promise.all(APPS.map((app) => collectApp(ctx, app, dir, noStatus)));
-  for (const r of reports) showApp(ctx, r);
+  for (const r of reports) showApp(r);
   showWarnings(ctx);
   return 0;
 }

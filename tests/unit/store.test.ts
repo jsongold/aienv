@@ -13,7 +13,6 @@ import {
   linkClaudeShared,
   metaRead,
   metaWrite,
-  renameAccount,
   sanitize,
   selectAccount,
 } from '../../src/store.ts';
@@ -349,74 +348,4 @@ test('linkClaudeShared: links existing items, creates projects, skips the rest',
   // idempotent
   linkClaudeShared(ctx, acc.store);
   assert.deepEqual(fs.readdirSync(acc.store).sort(), ['.aienv-meta', 'CLAUDE.md', 'projects', 'settings.json', 'skills']);
-});
-
-// --- renameAccount -------------------------------------------------------------
-
-function linkFor(ctx: Ctx, acc: Account): string {
-  const link = displayLinkPath(ctx, acc.app, acc.org, acc.email);
-  fs.symlinkSync(`../../.store/${acc.id}`, link);
-  return link;
-}
-
-test('renameAccount: rewrites meta, creates the new relative link, removes the old', (t) => {
-  const { ctx } = mkCtx(t);
-  const acc = addAccount(ctx, 'aaaa0001', 'codex', '-', 'unknown');
-  const oldLink = linkFor(ctx, acc);
-
-  assert.equal(renameAccount(ctx, acc, 'me@example.com'), true);
-
-  assert.deepEqual(metaRead(path.join(acc.store, '.aienv-meta')), { app: 'codex', org: '-', email: 'me@example.com' });
-  const newLink = `${ctx.home}/codex/-/me@example.com`;
-  assert.equal(fs.readlinkSync(newLink), '../../.store/aaaa0001');
-  assert.equal(fs.realpathSync(newLink), fs.realpathSync(acc.store));
-  assert.equal(fs.lstatSync(oldLink, { throwIfNoEntry: false }), undefined);
-  assert.equal(accountLabel(ctx, 'codex', 'aaaa0001'), '-/me@example.com');
-});
-
-test('renameAccount: replaces a stale symlink at the new path; keeps a non-symlink old path', (t) => {
-  const { ctx } = mkCtx(t);
-  const acc = addAccount(ctx, 'aaaa0001', 'codex', '-', 'unknown');
-  const oldPath = displayLinkPath(ctx, 'codex', '-', 'unknown');
-  fs.writeFileSync(oldPath, 'not a symlink');
-  fs.symlinkSync('../../.store/gone', `${ctx.home}/codex/-/me@example.com`);
-
-  assert.equal(renameAccount(ctx, acc, 'me@example.com'), true);
-  assert.equal(fs.readlinkSync(`${ctx.home}/codex/-/me@example.com`), '../../.store/aaaa0001');
-  assert.equal(fs.readFileSync(oldPath, 'utf8'), 'not a symlink');
-});
-
-test('renameAccount: conflict with another account changes nothing', (t) => {
-  const { ctx } = mkCtx(t);
-  const acc = addAccount(ctx, 'aaaa0001', 'codex', '-', 'unknown');
-  const other = addAccount(ctx, 'bbbb0002', 'codex', '-', 'me@example.com');
-  const oldLink = linkFor(ctx, acc);
-  const otherLink = linkFor(ctx, other);
-
-  assert.equal(renameAccount(ctx, acc, 'me@example.com'), false);
-
-  assert.equal(metaRead(path.join(acc.store, '.aienv-meta')).email, 'unknown');
-  assert.equal(fs.readlinkSync(oldLink), '../../.store/aaaa0001');
-  assert.equal(fs.readlinkSync(otherLink), '../../.store/bbbb0002');
-});
-
-test('renameAccount: same email under another org or app is not a conflict', (t) => {
-  const { ctx } = mkCtx(t);
-  const acc = addAccount(ctx, 'aaaa0001', 'codex', '-', 'unknown');
-  addAccount(ctx, 'bbbb0002', 'codex', 'Org', 'me@example.com');
-  addAccount(ctx, 'cccc0003', 'claude', '-', 'me@example.com');
-  assert.equal(renameAccount(ctx, acc, 'me@example.com'), true);
-});
-
-test('renameAccount: a non-symlink in the way is a conflict', (t) => {
-  const { ctx } = mkCtx(t);
-  const acc = addAccount(ctx, 'aaaa0001', 'codex', '-', 'unknown');
-  const oldLink = linkFor(ctx, acc);
-  fs.mkdirSync(`${ctx.home}/codex/-/me@example.com`);
-
-  assert.equal(renameAccount(ctx, acc, 'me@example.com'), false);
-
-  assert.equal(metaRead(path.join(acc.store, '.aienv-meta')).email, 'unknown');
-  assert.equal(fs.readlinkSync(oldLink), '../../.store/aaaa0001');
-  assert.ok(fs.statSync(`${ctx.home}/codex/-/me@example.com`).isDirectory());
 });

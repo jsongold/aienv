@@ -337,40 +337,31 @@ test('defaultIdentity', async () => {
 });
 
 test('accountStatus: claude matrix', async () => {
-  const status = async (json: string | null, org: string, email: string): Promise<unknown> => {
+  const status = async (json: string | null, org: string, email: string): Promise<string> => {
     const real = mkdir('real');
     script(real, 'claude', json === null ? '#!/bin/sh\nexit 0\n' : CLAUDE_STATUS(json));
     return accountStatus(makeCtx([real]), account('claude', org, email));
   };
   const ok = '{"loggedIn":true,"email":"a@b.c","orgName":"Acme"}';
-  assert.deepEqual(await status(ok, 'Acme', 'a@b.c'), { text: 'logged-in' });
-  assert.deepEqual(await status(ok, 'Acme', 'other@b.c'), { text: 'logged-in MISMATCH' });
-  assert.deepEqual(await status(ok, 'Other', 'a@b.c'), { text: 'logged-in MISMATCH' });
+  assert.equal(await status(ok, 'Acme', 'a@b.c'), 'logged-in');
+  assert.equal(await status(ok, 'Acme', 'other@b.c'), 'logged-in MISMATCH');
+  assert.equal(await status(ok, 'Other', 'a@b.c'), 'logged-in MISMATCH');
   // Empty reported fields never mismatch.
-  assert.deepEqual(await status('{"loggedIn":true}', 'Acme', 'a@b.c'), { text: 'logged-in' });
-  assert.deepEqual(await status('{"loggedIn":false}', 'Acme', 'a@b.c'), { text: 'logged-out' });
-  assert.deepEqual(await status('{"x":1}', 'Acme', 'a@b.c'), { text: '?' });
-  assert.deepEqual(await status('garbage', 'Acme', 'a@b.c'), { text: '?' });
-  assert.deepEqual(await status(null, 'Acme', 'a@b.c'), { text: '?' });
-  assert.deepEqual(await accountStatus(makeCtx([]), account('claude', 'Acme', 'a@b.c')), {
-    text: '?',
-  });
+  assert.equal(await status('{"loggedIn":true}', 'Acme', 'a@b.c'), 'logged-in');
+  assert.equal(await status('{"loggedIn":false}', 'Acme', 'a@b.c'), 'logged-out');
+  assert.equal(await status('{"x":1}', 'Acme', 'a@b.c'), '?');
+  assert.equal(await status('garbage', 'Acme', 'a@b.c'), '?');
+  assert.equal(await status(null, 'Acme', 'a@b.c'), '?');
+  assert.equal(await accountStatus(makeCtx([]), account('claude', 'Acme', 'a@b.c')), '?');
 });
 
 test('accountStatus: codex matrix and opencode', async () => {
   const real = mkdir('real');
   script(real, 'codex', CODEX_OK);
   const ctx = makeCtx([real], { FAKE_CODEX_EMAIL: 'me@example.com' });
-  assert.deepEqual(await accountStatus(ctx, account('codex', '-', 'me@example.com')), {
-    text: 'logged-in',
-  });
-  assert.deepEqual(await accountStatus(ctx, account('codex', '-', 'other@example.com')), {
-    text: 'logged-in MISMATCH',
-  });
-  assert.deepEqual(await accountStatus(ctx, account('codex', '-', 'unknown')), {
-    text: 'logged-in',
-    detectedEmail: 'me@example.com',
-  });
+  assert.equal(await accountStatus(ctx, account('codex', '-', 'me@example.com')), 'logged-in');
+  assert.equal(await accountStatus(ctx, account('codex', '-', 'other@example.com')), 'logged-in MISMATCH');
+  assert.equal(await accountStatus(ctx, account('codex', '-', 'unknown')), 'logged-in');
 
   // Logged in but the app-server gives nothing (acceptance-suite fake without email).
   const noEmail = mkdir('real');
@@ -379,22 +370,12 @@ test('accountStatus: codex matrix and opencode', async () => {
     'codex',
     '#!/bin/sh\nif [ "$1" = login ]; then echo ok; exit 0; fi\nexit 0\n',
   );
-  assert.deepEqual(await accountStatus(makeCtx([noEmail]), account('codex', '-', 'unknown')), {
-    text: 'logged-in',
-  });
-  assert.deepEqual(await accountStatus(makeCtx([noEmail]), account('codex', '-', 'x@y.z')), {
-    text: 'logged-in',
-  });
+  assert.equal(await accountStatus(makeCtx([noEmail]), account('codex', '-', 'unknown')), 'logged-in');
+  assert.equal(await accountStatus(makeCtx([noEmail]), account('codex', '-', 'x@y.z')), 'logged-in');
 
   const loggedOut = mkdir('real');
   script(loggedOut, 'codex', '#!/bin/sh\nexit 1\n');
-  assert.deepEqual(await accountStatus(makeCtx([loggedOut]), account('codex', '-', 'x@y.z')), {
-    text: 'logged-out/unknown',
-  });
-  assert.deepEqual(await accountStatus(makeCtx([]), account('codex', '-', 'x@y.z')), {
-    text: 'logged-out/unknown',
-  });
-  assert.deepEqual(await accountStatus(makeCtx([]), account('opencode', '-', 'x@y.z')), {
-    text: '?',
-  });
+  assert.equal(await accountStatus(makeCtx([loggedOut]), account('codex', '-', 'x@y.z')), 'logged-out/unknown');
+  assert.equal(await accountStatus(makeCtx([]), account('codex', '-', 'x@y.z')), 'logged-out/unknown');
+  assert.equal(await accountStatus(makeCtx([]), account('opencode', '-', 'x@y.z')), '?');
 });
