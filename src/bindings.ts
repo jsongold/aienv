@@ -106,27 +106,16 @@ export function resolveStore(ctx: Ctx, app: App, dir: string): Resolution {
     }
   }
 
-  let source: Resolution['source'];
-  let outDir: string;
-  if (best !== '') {
-    source = 'dir';
-    outDir = bestDir;
-  } else if (glob !== '') {
+  if (best === '') {
+    if (glob === '') return { id: '', dir: '', dangling: false };
     best = glob;
-    source = 'global';
-    outDir = '*';
-  } else {
-    return { store: null, id: '', source: 'none', dir: '', dangling: false };
+    bestDir = '*';
   }
-
-  const store = `${ctx.storeDir}/${best}`;
   let isDir = false;
   try {
-    isDir = fs.statSync(store).isDirectory();
+    isDir = fs.statSync(`${ctx.storeDir}/${best}`).isDirectory();
   } catch {
     isDir = false;
   }
-  return isDir
-    ? { store, id: best, source, dir: outDir, dangling: false }
-    : { store: null, id: best, source, dir: outDir, dangling: true };
+  return { id: best, dir: bestDir, dangling: !isDir };
 }

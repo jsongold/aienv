@@ -18,15 +18,13 @@ import {
 } from './store.ts';
 import { bindingSet, bindingUnset, bindingsRemoveId, resolveStore } from './bindings.ts';
 import {
+  AGENTS,
   ALL_KEY_VARS,
   accountStatus,
   captureAppAsync,
   defaultIdentity,
   detectIdentity,
-  envVarFor,
   firstInPath,
-  loginArgs,
-  logoutArgs,
   runApp,
 } from './agents.ts';
 
@@ -103,33 +101,29 @@ function sleepMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** One line from fd 0, synchronously. null = EOF before any byte. The prompt goes to
- *  stderr only when stdin is a TTY (zsh `read "v?prompt"`). Leading/trailing blanks are
- *  stripped like zsh `read -r` with the default IFS. */
+/** One line from fd 0, synchronously, a byte at a time so a later prompt still sees the
+ *  rest of a piped stdin. null = EOF before any byte. The prompt goes to stderr only when
+ *  stdin is a TTY (zsh `read "v?prompt"`); blanks are trimmed like zsh `read -r`. */
 function readLine(prompt: string): string | null {
   if (tty.isatty(0)) process.stderr.write(prompt);
   const bytes: number[] = [];
   const buf = Buffer.alloc(1);
-  let sawAny = false;
+  let got = 0;
   for (;;) {
-    let n = 0;
     try {
-      n = fs.readSync(0, buf, 0, 1, null);
+      got = fs.readSync(0, buf, 0, 1, null);
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
       if (code === 'EAGAIN' || code === 'EINTR') {
         sleepMs(10);
         continue;
       }
-      if (code === 'EOF') break;
-      break; // unreadable stdin (closed fd, EISDIR, ...) behaves like EOF
+      got = 0; // unreadable stdin (closed fd, EISDIR, ...) behaves like EOF
     }
-    if (n === 0) break;
-    sawAny = true;
-    if (buf[0] === 0x0a) break;
+    if (got === 0 || buf[0] === 0x0a) break;
     bytes.push(buf[0]!);
   }
-  if (!sawAny) return null;
+  if (got === 0 && bytes.length === 0) return null;
   return Buffer.from(bytes)
     .toString('utf8')
     .replace(/^[ \t]+|[ \t\r]+$/g, '');
@@ -190,27 +184,18 @@ export async function cmdAdd(ctx: Ctx, args: string[]): Promise<number> {
   const appArg = args[0] ?? '';
   if (appArg === '') throw usageError('usage: aienv add <app>');
   const app = requireApp(appArg);
-  const envVar = envVarFor(app);
+  const { envVar, login } = AGENTS[app];
   fs.mkdirSync(ctx.storeDir, { recursive: true });
   const id = genId(ctx);
   const store = path.join(ctx.storeDir, id);
 
-  // Until meta is written, any failure or signal removes the half-created store.
-  let pending = true;
-  const discard = (): void => {
-    if (!pending) return;
-    pending = false;
-    fs.rmSync(store, { recursive: true, force: true });
-  };
-  // Prepended: runs before cli.ts' handler, which exits.
-  process.prependListener('SIGINT', discard);
-  process.prependListener('SIGTERM', discard);
-  process.prependListener('exit', discard);
-
+  // Until meta is written, a failure removes the half-created store. So does a signal:
+  // cli.ts turns it into process.exit, which skips catch/finally but runs 'exit' hooks.
+  const discard = (): void => fs.rmSync(store, { recursive: true, force: true });
+  process.once('exit', discard);
   let identity: Identity;
   try {
     fs.mkdirSync(store, { recursive: true });
-    const login = loginArgs(app);
     err(`aienv: running '${app} ${login.join(' ')}' with ${envVar}=${store}`);
     const rc = runApp(ctx, app, store, login);
     await yieldToEventLoop();
@@ -231,11 +216,10 @@ export async function cmdAdd(ctx: Ctx, args: string[]): Promise<number> {
     }
     rejectDuplicate(ctx, app, identity.org, identity.email);
     metaWrite(store, app, identity.org, identity.email);
-    pending = false;
-  } finally {
+  } catch (e) {
     discard();
-    process.removeListener('SIGINT', discard);
-    process.removeListener('SIGTERM', discard);
+    throw e;
+  } finally {
     process.removeListener('exit', discard);
   }
 
@@ -308,7 +292,7 @@ export async function cmdRemove(ctx: Ctx, args: string[]): Promise<number> {
     return 0;
   }
   const store = path.join(ctx.storeDir, acc.id);
-  const logout = logoutArgs(app);
+  const { logout } = AGENTS[app];
   if ((await captureAppAsync(ctx, app, store, logout)) === null) {
     warn(`'${app} ${logout.join(' ')}' failed or is unavailable; removing the local store anyway`);
   }
@@ -334,8 +318,8 @@ type AppReport = {
 async function collectApp(ctx: Ctx, app: App, dir: string, noStatus: boolean): Promise<AppReport> {
   const res = resolveStore(ctx, app, dir);
   let src = 'none';
-  if (res.store !== null) src = res.source === 'dir' ? `dir: ${res.dir}` : 'global';
-  else if (res.dangling) src = `${res.dir} -> DANGLING ${res.id}`;
+  if (res.dangling) src = `${res.dir} -> DANGLING ${res.id}`;
+  else if (res.id !== '') src = res.dir === '*' ? 'global' : `dir: ${res.dir}`;
   const accounts = accountsLoad(ctx, app);
   // Nothing bound (or dangling): the agent runs with its own default login.
   // When that login is identifiable, star the stored account it equals.

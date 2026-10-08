@@ -133,7 +133,7 @@ test('bindingsRemoveId drops the id across apps', (t) => {
 
 test('resolveStore: none without file or matching binding', (t) => {
   const ctx = makeCtx(t);
-  const none = { store: null, id: '', source: 'none', dir: '', dangling: false };
+  const none = { id: '', dir: '', dangling: false };
   assert.deepEqual(resolveStore(ctx, 'claude', '/a'), none);
   fs.writeFileSync(ctx.bindingsPath, 'codex\t/a\tid1\nclaude\t/other\tid2\n');
   assert.deepEqual(resolveStore(ctx, 'claude', '/a'), none);
@@ -142,12 +142,10 @@ test('resolveStore: none without file or matching binding', (t) => {
 test('resolveStore: nearest ancestor wins regardless of line order', (t) => {
   const ctx = makeCtx(t);
   mkStore(ctx, 'outer');
-  const inner = mkStore(ctx, 'inner');
+  mkStore(ctx, 'inner');
   fs.writeFileSync(ctx.bindingsPath, 'claude\t/a/b\tinner\nclaude\t/a\touter\nclaude\t/a/b/c/d\tdeep\n');
   assert.deepEqual(resolveStore(ctx, 'claude', '/a/b/c'), {
-    store: inner,
     id: 'inner',
-    source: 'dir',
     dir: '/a/b',
     dangling: false,
   });
@@ -159,8 +157,8 @@ test('resolveStore: a prefix that is not a path ancestor does not match', (t) =>
   const ctx = makeCtx(t);
   mkStore(ctx, 'id1');
   fs.writeFileSync(ctx.bindingsPath, 'claude\t/a/b\tid1\n');
-  assert.equal(resolveStore(ctx, 'claude', '/a/bc').source, 'none');
-  assert.equal(resolveStore(ctx, 'claude', '/a').source, 'none');
+  assert.equal(resolveStore(ctx, 'claude', '/a/bc').id, '');
+  assert.equal(resolveStore(ctx, 'claude', '/a').id, '');
 });
 
 test('resolveStore: trailing slash on the binding dir is ignored, dir reported verbatim', (t) => {
@@ -174,14 +172,12 @@ test('resolveStore: trailing slash on the binding dir is ignored, dir reported v
 
 test("resolveStore: '/' binding matches everything but loses to a nearer one", (t) => {
   const ctx = makeCtx(t);
-  const root = mkStore(ctx, 'root');
+  mkStore(ctx, 'root');
   mkStore(ctx, 'near');
   mkStore(ctx, 'glob');
   fs.writeFileSync(ctx.bindingsPath, 'claude\t*\tglob\nclaude\t/\troot\nclaude\t/a\tnear\n');
   assert.deepEqual(resolveStore(ctx, 'claude', '/zzz/y'), {
-    store: root,
     id: 'root',
-    source: 'dir',
     dir: '/',
     dangling: false,
   });
@@ -191,14 +187,12 @@ test("resolveStore: '/' binding matches everything but loses to a nearer one", (
 
 test('resolveStore: global fallback uses the first * line; dir beats global', (t) => {
   const ctx = makeCtx(t);
-  const g1 = mkStore(ctx, 'g1');
+  mkStore(ctx, 'g1');
   mkStore(ctx, 'g2');
   mkStore(ctx, 'd1');
   fs.writeFileSync(ctx.bindingsPath, 'codex\t*\tcx\nclaude\t*\tg1\nclaude\t*\tg2\nclaude\t/a\td1\n');
   assert.deepEqual(resolveStore(ctx, 'claude', '/elsewhere'), {
-    store: g1,
     id: 'g1',
-    source: 'global',
     dir: '*',
     dangling: false,
   });
@@ -217,18 +211,14 @@ test('resolveStore: dangling when the store is missing or not a directory', (t) 
   const ctx = makeCtx(t);
   fs.writeFileSync(ctx.bindingsPath, 'claude\t/a\tgone\ncodex\t*\tfile\n');
   assert.deepEqual(resolveStore(ctx, 'claude', '/a/b'), {
-    store: null,
     id: 'gone',
-    source: 'dir',
     dir: '/a',
     dangling: true,
   });
   fs.mkdirSync(ctx.storeDir);
   fs.writeFileSync(`${ctx.storeDir}/file`, '');
   assert.deepEqual(resolveStore(ctx, 'codex', '/q'), {
-    store: null,
     id: 'file',
-    source: 'global',
     dir: '*',
     dangling: true,
   });

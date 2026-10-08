@@ -5,18 +5,15 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 
 import {
+  AGENTS,
   ALL_KEY_VARS,
   accountStatus,
   captureAppAsync,
   codexEmail,
   defaultIdentity,
   detectIdentity,
-  envVarFor,
   findRealBin,
   firstInPath,
-  keyVarsFor,
-  loginArgs,
-  logoutArgs,
   runApp,
 } from '../../src/agents.ts';
 import type { Account, App, Ctx } from '../../src/types.ts';
@@ -77,16 +74,26 @@ exit 0
 `;
 
 test('static tables', () => {
-  assert.equal(envVarFor('claude'), 'CLAUDE_CONFIG_DIR');
-  assert.equal(envVarFor('codex'), 'CODEX_HOME');
-  assert.equal(envVarFor('opencode'), 'XDG_DATA_HOME');
-  assert.deepEqual(keyVarsFor('claude'), [
-    'ANTHROPIC_API_KEY',
-    'ANTHROPIC_AUTH_TOKEN',
-    'CLAUDE_CODE_OAUTH_TOKEN',
-  ]);
-  assert.deepEqual(keyVarsFor('codex'), ['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN']);
-  assert.deepEqual(keyVarsFor('opencode'), ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY']);
+  assert.deepEqual(AGENTS, {
+    claude: {
+      envVar: 'CLAUDE_CONFIG_DIR',
+      keyVars: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'],
+      login: ['auth', 'login'],
+      logout: ['auth', 'logout'],
+    },
+    codex: {
+      envVar: 'CODEX_HOME',
+      keyVars: ['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN'],
+      login: ['login'],
+      logout: ['logout'],
+    },
+    opencode: {
+      envVar: 'XDG_DATA_HOME',
+      keyVars: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'],
+      login: ['auth', 'login'],
+      logout: ['auth', 'logout'],
+    },
+  });
   assert.deepEqual(ALL_KEY_VARS, [
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_AUTH_TOKEN',
@@ -94,12 +101,6 @@ test('static tables', () => {
     'OPENAI_API_KEY',
     'CODEX_ACCESS_TOKEN',
   ]);
-  assert.deepEqual(loginArgs('claude'), ['auth', 'login']);
-  assert.deepEqual(loginArgs('codex'), ['login']);
-  assert.deepEqual(loginArgs('opencode'), ['auth', 'login']);
-  assert.deepEqual(logoutArgs('claude'), ['auth', 'logout']);
-  assert.deepEqual(logoutArgs('codex'), ['logout']);
-  assert.deepEqual(logoutArgs('opencode'), ['auth', 'logout']);
 });
 
 test('findRealBin skips the shim dir, even through a symlink', () => {

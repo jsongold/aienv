@@ -6,46 +6,37 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { APPS } from './types.ts';
 import type { Account, App, Ctx, Identity } from './types.ts';
 
-/** Union of every env var that outranks a subscription login (names only). */
-export const ALL_KEY_VARS: readonly string[] = [
-  'ANTHROPIC_API_KEY',
-  'ANTHROPIC_AUTH_TOKEN',
-  'CLAUDE_CODE_OAUTH_TOKEN',
-  'OPENAI_API_KEY',
-  'CODEX_ACCESS_TOKEN',
-];
+/** Per-app facts: the config env var the shim relocates, the key vars that outrank a
+ *  subscription login (names only, never read), and the login / logout argv. */
+export const AGENTS: Record<
+  App,
+  { envVar: string; keyVars: string[]; login: string[]; logout: string[] }
+> = {
+  claude: {
+    envVar: 'CLAUDE_CONFIG_DIR',
+    keyVars: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'],
+    login: ['auth', 'login'],
+    logout: ['auth', 'logout'],
+  },
+  codex: {
+    envVar: 'CODEX_HOME',
+    keyVars: ['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN'],
+    login: ['login'],
+    logout: ['logout'],
+  },
+  opencode: {
+    envVar: 'XDG_DATA_HOME',
+    keyVars: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'],
+    login: ['auth', 'login'],
+    logout: ['auth', 'logout'],
+  },
+};
 
-export function envVarFor(app: App): string {
-  switch (app) {
-    case 'claude':
-      return 'CLAUDE_CONFIG_DIR';
-    case 'codex':
-      return 'CODEX_HOME';
-    case 'opencode':
-      return 'XDG_DATA_HOME';
-  }
-}
-
-export function keyVarsFor(app: App): string[] {
-  switch (app) {
-    case 'claude':
-      return ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'];
-    case 'codex':
-      return ['OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN'];
-    case 'opencode':
-      return ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'];
-  }
-}
-
-export function loginArgs(app: App): string[] {
-  return app === 'codex' ? ['login'] : ['auth', 'login'];
-}
-
-export function logoutArgs(app: App): string[] {
-  return app === 'codex' ? ['logout'] : ['auth', 'logout'];
-}
+/** Union of every key var, for the warnings in `show`. */
+export const ALL_KEY_VARS: readonly string[] = [...new Set(APPS.flatMap((app) => AGENTS[app].keyVars))];
 
 function pathEntries(ctx: Ctx): string[] {
   const raw = ctx.env.PATH ?? '';
@@ -129,10 +120,10 @@ function childEnv(ctx: Ctx, app: App, store: string | null): NodeJS.ProcessEnv {
   for (const [k, v] of Object.entries(ctx.env)) {
     if (v !== undefined) env[k] = v;
   }
-  for (const k of keyVarsFor(app)) delete env[k];
-  const name = envVarFor(app);
-  if (store !== null) env[name] = store;
-  else if (app === 'claude') delete env[name];
+  const { envVar, keyVars } = AGENTS[app];
+  for (const k of keyVars) delete env[k];
+  if (store !== null) env[envVar] = store;
+  else if (app === 'claude') delete env[envVar];
   return env;
 }
 
